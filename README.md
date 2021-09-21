@@ -10,4 +10,5 @@ https://cseweb.ucsd.edu/~jmcauley/pdfs/icdm18.pdf
 
 
 ## Usage
+ python main-tf2.py --dataset=ae --train_dir=default --maxlen=50 --dropout_rate=0.5 --lr=0.001 --hidden_units=100 --num_epochs=50 --text_features=1
 

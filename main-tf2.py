@@ -5,12 +5,11 @@ import tensorflow as tf
 from sampler import WarpSampler
 from tqdm import tqdm
 
-# from model import Model
-# from model2 import SASREC
-from model3 import SASREC
-from model_sse_pt import SSEPT
+from sasrec import SASREC
+from sasrec_text import SASREC_TEXT
+from ssept import SSEPT
 from util import *
-
+import pickle
 
 def str2bool(s):
     if s not in {'False', 'True'}:
@@ -75,6 +74,14 @@ parser.add_argument('--num_heads', default=1, type=int)
 parser.add_argument('--dropout_rate', default=0.1, type=float)
 parser.add_argument('--l2_emb', default=0.0, type=float)
 parser.add_argument('--num_neg_test', default=100, type=int)
+parser.add_argument('--model_name', default="sasrec", type=str)
+
+# for text features
+parser.add_argument('--text_features', default=0, type=int)
+parser.add_argument('--text_maxlen', default=100, type=int)
+parser.add_argument('--vocab_size', default=5000, type=int)
+parser.add_argument('--text_embed', default=50, type=int)
+
 
 args = parser.parse_args()
 if not os.path.isdir(args.dataset + '_' + args.train_dir):
@@ -83,9 +90,8 @@ with open(os.path.join(args.dataset + '_' + args.train_dir, 'args.txt'), 'w') as
     f.write('\n'.join([str(k) + ',' + str(v) for k, v in sorted(vars(args).items(), key=lambda x: x[0])]))
 f.close()
 
-# if args.dataset in ['ae']:
-#     dataset = data_partition_with_time(args.dataset, "\t")
-# else:
+f = open(os.path.join(args.dataset + '_' + args.train_dir, 'log.txt'), 'w')
+
 dataset = data_partition(args.dataset)
 [user_train, user_valid, user_test, usernum, itemnum] = dataset
 num_steps = int(len(user_train) / args.batch_size)
@@ -94,33 +100,67 @@ for u in user_train:
     cc += len(user_train[u])
 print('%g Users and %g items' % (usernum, itemnum))
 print('average sequence length: %.2f' % (cc / len(user_train)))
+f.write(f'{usernum} Users and {itemnum} items\n')
+f.write(f'average sequence length: {cc / len(user_train):.2f} \n')
 
-f = open(os.path.join(args.dataset + '_' + args.train_dir, 'log.txt'), 'w')
+if args.text_features == 1:
+    embed_matrix = text_processing(args)
+    # item_desc, embed_matrix = text_processing(args)
+else:
+    item_desc = None
 
-# model = SASREC(item_num=itemnum,
-#                seq_max_len=args.maxlen,
-#                num_blocks=args.num_blocks,
-#                embedding_dim=args.hidden_units,
-#                attention_dim=args.hidden_units,
-#                attention_num_heads=args.num_heads,
-#                dropout_rate=args.dropout_rate,
-#             #    conv_dims = kwargs.get("conv_dims", [100, 100])
-#                l2_reg=args.l2_emb,
-#                num_neg_test=args.num_neg_test
-# )
+if args.model_name == "sasrec":
+    if args.text_features == 1:
+        print("Invoking sasrec_text model ... ")
+        f.write("Invoking sasrec_text model ... ")
+        model = SASREC_TEXT(item_num=itemnum,
+                    seq_max_len=args.maxlen,
+                    num_blocks=args.num_blocks,
+                    embedding_dim=args.hidden_units,
+                    attention_dim=args.hidden_units,
+                    attention_num_heads=args.num_heads,
+                    dropout_rate=args.dropout_rate,
+                    #    conv_dims = kwargs.get("conv_dims", [100, 100])
+                    l2_reg=args.l2_emb,
+                    num_neg_test=args.num_neg_test,
+                    # max_seq_len_text=args.text_maxlen,
+                    # vocab_size=args.vocab_size,
+                    text_embedding_dimension=args.text_embed,
+                    item_text_embedding_matrix=embed_matrix,
+                    # item_text_sequences=item_desc
+        )
 
-model = SSEPT(item_num=itemnum,
-              user_num=usernum,
-              seq_max_len=args.maxlen,
-              num_blocks=args.num_blocks,
-              user_embedding_dim=args.hidden_units,
-              item_embedding_dim=args.hidden_units,
-              attention_dim=args.hidden_units,
-              attention_num_heads=args.num_heads,
-              dropout_rate=args.dropout_rate,
-              l2_reg=args.l2_emb,
-              num_neg_test=args.num_neg_test
-)
+    else:
+        print("Invoking vanilla SASREC model ... ")
+        f.write("Invoking vanilla SASREC model ... ")
+        model = SASREC(item_num=itemnum,
+                    seq_max_len=args.maxlen,
+                    num_blocks=args.num_blocks,
+                    embedding_dim=args.hidden_units,
+                    attention_dim=args.hidden_units,
+                    attention_num_heads=args.num_heads,
+                    dropout_rate=args.dropout_rate,
+                    #    conv_dims = kwargs.get("conv_dims", [100, 100])
+                    l2_reg=args.l2_emb,
+                    num_neg_test=args.num_neg_test
+        )
+elif args.model_name == "ssept":
+    print("Invoking SSEPT model ... ")
+    f.write("Invoking SSEPT model ... ")
+    model = SSEPT(item_num=itemnum,
+                user_num=usernum,
+                seq_max_len=args.maxlen,
+                num_blocks=args.num_blocks,
+                user_embedding_dim=args.hidden_units,
+                item_embedding_dim=args.hidden_units,
+                attention_dim=args.hidden_units,
+                attention_num_heads=args.num_heads,
+                dropout_rate=args.dropout_rate,
+                l2_reg=args.l2_emb,
+                num_neg_test=args.num_neg_test
+    )
+else:
+    raise ValueError(f"Unknown model name {args.model_name}")
 
 # optimizer = tf.keras.optimizers.Adam(learning_rate=args.lr, decay=0.9)
 optimizer = tf.keras.optimizers.Adam(learning_rate=args.lr,
@@ -173,13 +213,27 @@ def accuracy_function(real, pred):
 train_loss = tf.keras.metrics.Mean(name='train_loss')
 train_accuracy = tf.keras.metrics.Mean(name='train_accuracy')
 
-train_step_signature = [
-    {'users': tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
-     'input_seq': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
-     'positive': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
-     'negative': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64)},
-    tf.TensorSpec(shape=(None, 1), dtype=tf.int64)
-]
+if args.text_features == 1:
+    train_step_signature = [
+        {'users': tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
+         'input_seq': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+         'positive': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+         'negative': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+        #  'inp_seq_tokens': tf.TensorSpec(shape=(None, args.maxlen, args.text_maxlen), dtype=tf.int64),
+        #  'pos_tokens': tf.TensorSpec(shape=(None, args.maxlen, args.text_maxlen), dtype=tf.int64),
+        #  'neg_tokens': tf.TensorSpec(shape=(None, args.maxlen, args.text_maxlen), dtype=tf.int64),
+        },
+        tf.TensorSpec(shape=(None, 1), dtype=tf.int64)
+    ]
+else:
+    train_step_signature = [
+        {'users': tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
+         'input_seq': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+         'positive': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+         'negative': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64)
+         },
+         tf.TensorSpec(shape=(None, 1), dtype=tf.int64)
+    ]
 
 @tf.function(input_signature=train_step_signature)
 def train_step(inp, tar):
@@ -196,6 +250,15 @@ def train_step(inp, tar):
     # train_accuracy(accuracy_function(tar, predictions))
     return loss
 
+# with open('sample_nan.pkl', 'rb') as fr:
+#     inputs = pickle.load(fr)
+# # if np.isnan(np.sum(inputs['inp_seq_tokens'])):
+# #     sys.exit("NAN in input")
+# model.load_weights('./checkpoints/my_checkpoint')
+# # model = tf.keras.models.load_model('saved_model/temp_model')
+# out = model(inputs, training=False)
+# print(out)
+# sys.exit("TEST")
 
 sampler = WarpSampler(user_train, usernum, itemnum, batch_size=args.batch_size, maxlen=args.maxlen, n_workers=3)
 
@@ -212,11 +275,26 @@ for epoch in range(1, args.num_epochs + 1):
         u, seq, pos, neg = sampler.next_batch()
 
         inputs, target = create_combined_dataset(u, seq, pos, neg, args.maxlen)
-        # out = model(inputs, training=True)
+        # if args.text_features == 1:
+        #     inputs['inp_seq_tokens'] = item_desc[seq, :]
+        #     inputs['pos_tokens'] = item_desc[pos, :]
+        #     inputs['neg_tokens'] = item_desc[neg, :]
+            # print(inputs['inp_seq_tokens'].shape)
+        
+        # print(inputs)
+        # out = model(inputs, training=False)
         # print(out)
-        # sys.exit("KK")
+        # print(out.shape)
+        # sys.exit("TRAIN")
 
         loss = train_step(inputs, target)
+        # if tf.math.is_nan(loss):
+        #     with open('sample_nan.pkl', 'wb') as fw:
+        #         pickle.dump(inputs, fw)
+        #     model.save_weights('./checkpoints/my_checkpoint')
+        #     model.save('saved_model/temp_model')
+        #     sys.exit("!! NAN LOSS")
+
         step_loss.append(loss)
         # with tf.GradientTape() as tape:
         #     pos_logits, neg_logits, istarget = model(inputs, training=True)
@@ -225,23 +303,25 @@ for epoch in range(1, args.num_epochs + 1):
         # grads = tape.gradient(loss, model.trainable_variables)
         # optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
-    print(f"Epoch: {epoch}, Loss: {np.mean(step_loss):.3f}, {train_loss.result():.3f}")
+    print(f"Epoch: {epoch}, Train Loss: {np.mean(step_loss):.3f}, {train_loss.result():.3f}")
+    f.write(f"Epoch: {epoch}, Train Loss: {np.mean(step_loss):.3f}, {train_loss.result():.3f}\n")
         
-    if epoch % 20 == 0:
+    if epoch % 5 == 0:
         t1 = time.time() - t0
         T += t1
         print('Evaluating...')
         t_test = evaluate(model, dataset, args)
         t_valid = evaluate_valid(model, dataset, args)
-        print(f"\nepoch: {epoch}, time: {T}, valid (NDCG@10: {t_valid[0]}, HR@10: {t_valid[1]})")
-        print(f"epoch: {epoch}, time: {T},  test (NDCG@10: {t_test[0]}, HR@10: {t_test[1]})")
+        print(f"\nepoch: {epoch}, time: {T}, valid (NDCG@10: {t_valid[0]:.4f}, HR@10: {t_valid[1]:.4f})")
+        print(f"epoch: {epoch}, time: {T},  test (NDCG@10: {t_test[0]:.4f}, HR@10: {t_test[1]:.4f})")
 
         f.write(str(t_valid) + ' ' + str(t_test) + '\n')
         f.flush()
         t0 = time.time()
 
 t_test = evaluate(model, dataset, args)
-print(f"\nepoch: {epoch}, test (NDCG@10: {t_test[0]}, HR@10: {t_test[1]})")
+print(f"\nepoch: {epoch}, test (NDCG@10: {t_test[0]:.4f}, HR@10: {t_test[1]:.4f})")
+f.write(f"\nepoch: {epoch}, test (NDCG@10: {t_test[0]:.4f}, HR@10: {t_test[1]:.4f})")
 # except:
 #     sampler.close()
 #     f.close()
@@ -270,6 +350,13 @@ print("Done")
     epoch: 40, time: 729.5262145996094, valid (NDCG@10: 0.28800812778906604, HR@10: 0.42751006088123)
     epoch: 40, time: 729.5262145996094,  test (NDCG@10: 0.2554444303109231, HR@10: 0.38506998444790047)
     nan issue
+
+    # new Beauty data, 40174 Users and 67310 items
+    python main-tf2.py --dataset=Beauty --train_dir=text --maxlen=50 --dropout_rate=0.5 --lr=0.001 --hidden_units=100 --num_epochs=50 --text_features=0
+    epoch: 50, test (NDCG@10: 0.3215, HR@10: 0.4743)
+
+    python main-tf2.py --dataset=Beauty --train_dir=text --maxlen=50 --dropout_rate=0.5 --lr=0.001 --hidden_units=100 --num_epochs=50 --text_features=0 --model_name=ssept
+    epoch: 50, test (NDCG@10: 0.2540, HR@10: 0.4194)
 """
 """
         # # train with positive samples

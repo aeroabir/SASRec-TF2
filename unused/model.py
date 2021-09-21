@@ -27,7 +27,7 @@ def embedding(input_seq, item_embedding_layer, positional_embedding_layer):
 
     seq_embeddings = item_embedding_layer(input_seq)
 
-    # FIXME 確認が必要
+    # FIXME
     positional_seq = tf.expand_dims(tf.range(tf.shape(input_seq)[1]), 0)
     positional_seq = tf.tile(positional_seq, [tf.shape(input_seq)[0], 1])
     positional_embeddings = positional_embedding_layer(positional_seq)
@@ -132,7 +132,7 @@ def sasrec(item_num: int, seq_max_len: int, num_blocks: int = 2, embedding_dim: 
     input_seq = inputs[0]
     candidate = inputs[1]
 
-    # FIXME 確認必要
+    # FIXME
     mask = tf.expand_dims(tf.cast(tf.not_equal(input_seq, 0), tf.float32), -1)
 
     # --- EMBEDDING LAYER ---
@@ -154,8 +154,6 @@ def sasrec(item_num: int, seq_max_len: int, num_blocks: int = 2, embedding_dim: 
     seq_attention = seq_embeddings
 
     for i in range(num_blocks):
-        # dropoutとresidual connectionは各関数内で行う
-
         # attention layer
         seq_attention = multihead_attention(queries=layer_normalization(seq_attention),
                                             keys=seq_attention,
@@ -169,7 +167,7 @@ def sasrec(item_num: int, seq_max_len: int, num_blocks: int = 2, embedding_dim: 
         # masking
         seq_attention *= mask
 
-    # 実装ではここで再度layer_normalizationしているが、必要ない気がする
+    # layer_normalization
     seq_attention = layer_normalization(seq_attention)  # (b, s, d)
 
     # --- PREDICTION LAYER ---
