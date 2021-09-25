@@ -12,7 +12,7 @@ Modified the original Git Repo: https://github.com/kang205/SASRec and the TF 2.x
 
 All the Amazon product datasets can be downloaded using the script download_and_process_amazon.py
 
-## Akgorithms
+## Algorithms
 
 1. SASRec: Original Transformer based Recommender
 2. SSEPT: Transformer with User embeddings
