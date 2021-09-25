@@ -12,6 +12,7 @@ from retrying import retry
 import gzip
 import shutil
 
+
 @retry(wait_random_min=1000, wait_random_max=5000, stop_max_attempt_number=5)
 def maybe_download(url, filename=None, work_directory=".", expected_bytes=None):
     """Download a file if it is not already downloaded.
@@ -131,18 +132,10 @@ def _download_reviews2(name, dest_path):
     """
 
     print(f"Downloading {name} data")
-    if 'meta' in name:
-        url = (
-            "http://deepyeti.ucsd.edu/jianmo/amazon/metaFiles2/"
-            + name
-            + ".gz"
-        )
+    if "meta" in name:
+        url = "http://deepyeti.ucsd.edu/jianmo/amazon/metaFiles2/" + name + ".gz"
     else:
-        url = (
-            "http://deepyeti.ucsd.edu/jianmo/amazon/categoryFiles/"
-            + name
-            + ".gz"
-        )
+        url = "http://deepyeti.ucsd.edu/jianmo/amazon/categoryFiles/" + name + ".gz"
 
     dirs, file = os.path.split(dest_path)
     maybe_download(url, file + ".gz", work_directory=dirs)
@@ -194,8 +187,8 @@ def _reviews_preprocessing(reviews_readfile):
     reviews_r = open(reviews_readfile, "r")
     reviews_w = open(reviews_writefile, "w")
     for line in reviews_r:
-        line = line.replace('true', 'True')
-        line = line.replace('false', 'False')
+        line = line.replace("true", "True")
+        line = line.replace("false", "False")
         # print(line)
         line_new = eval(line.strip())
         reviews_w.write(
@@ -226,9 +219,10 @@ def _meta_preprocessing(meta_readfile):
 
 
 def parse(path):
-    g = gzip.open(path, 'r')
-    for l in g:
-        yield eval(l)
+    g = gzip.open(path, "r")
+    for line in g:
+        yield eval(line)
+
 
 def data_process_with_time(fname, pname, K=10, sep=" ", item_set=None):
     User = defaultdict(list)
@@ -238,7 +232,7 @@ def data_process_with_time(fname, pname, K=10, sep=" ", item_set=None):
 
     item_counter = defaultdict(lambda: 0)
     user_counter = defaultdict(lambda: 0)
-    with open(fname, 'r') as fr:
+    with open(fname, "r") as fr:
         for line in fr:
             u, i, t = line.rstrip().split(sep)
             User[u].append((i, t))
@@ -252,7 +246,7 @@ def data_process_with_time(fname, pname, K=10, sep=" ", item_set=None):
             #     item_counter[i] = 1
 
     # print(item_counter['1304351475'], item_counter['1304482685'])
-    
+
     # remove items with less than K interactions
     print(f"Read {len(User)} users and {len(Items)} items")
     remove_items = set()
@@ -270,7 +264,7 @@ def data_process_with_time(fname, pname, K=10, sep=" ", item_set=None):
 
     if count_missing > 0:
         print(f"{count_missing} items are not in the meta data")
-    
+
     Items = Items - remove_items
 
     # remove users with less than K interactions
@@ -293,7 +287,7 @@ def data_process_with_time(fname, pname, K=10, sep=" ", item_set=None):
 
     count_del = 0
     user_count = 1
-    with open(pname, 'w') as fw:
+    with open(pname, "w") as fw:
         for user in Users:
             items = User[user]
             items = [tup for tup in items if tup[0] in Items]
@@ -308,7 +302,7 @@ def data_process_with_time(fname, pname, K=10, sep=" ", item_set=None):
                 # replace by the item-code
                 items = [item_dict[x[0]] for x in items]
                 for item in items:
-                    fw.write(str(user_count) + ' ' + str(item) + '\n')
+                    fw.write(str(user_count) + " " + str(item) + "\n")
                 user_count += 1
 
     print(f"Total {user_count-1} users, {count_del} removed")
@@ -317,15 +311,15 @@ def data_process_with_time(fname, pname, K=10, sep=" ", item_set=None):
 
 
 def nwords(txt, n):
-    return ' '.join(txt.split()[:n])
+    return " ".join(txt.split()[:n])
 
 
 if __name__ == "__main__":
     """
-        example usage: python download_and_process_amazon.py Beauty 5 0
+    example usage: python download_and_process_amazon.py Beauty 5 0
 
     """
-    keep_words = 100
+    keep_words = 100  # maximum number of words in the item description
     K = 10  # filter, minimum number of interactions (item and user)
     core = 5
     url_type = 1
@@ -334,7 +328,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         category = sys.argv[1]
     else:
-        category = 'Beauty'  # 'Toys_and_Games' # 'Movies_and_TV', 'Beauty', 'Electronics' (too big)
+        category = "Beauty"  # 'Toys_and_Games' # 'Movies_and_TV', 'Beauty', 'Electronics' (too big)
 
     if len(sys.argv) > 2:
         K = int(sys.argv[2])
@@ -347,16 +341,16 @@ if __name__ == "__main__":
 
     if url_type == 1:
         if core > 0:
-            reviews_name = 'reviews_' + category + '_' + str(core) + '.json'
+            reviews_name = "reviews_" + category + "_" + str(core) + ".json"
         else:
-            reviews_name = 'reviews_' + category + '.json'
+            reviews_name = "reviews_" + category + ".json"
     else:
-        reviews_name = category + '.json'
-    meta_name = 'meta_' + category + '.json'
+        reviews_name = category + ".json"
+    meta_name = "meta_" + category + ".json"
 
     reviews_file = os.path.join(data_path, reviews_name)
     meta_file = os.path.join(data_path, meta_name)
-    text_file = os.path.join(data_path, category+'_item_description.txt')
+    text_file = os.path.join(data_path, category + "_item_description.txt")
 
     print(f"Generating data for ***{category}***")
     download_and_extract(reviews_name, reviews_file)
@@ -365,40 +359,45 @@ if __name__ == "__main__":
 
     all_items = set()
     ignore_item = 0
-    with open(meta_file, 'r') as fr:
+    with open(meta_file, "r") as fr:
         for line in fr.readlines():
             jdict = eval(line)
-            if 'description' in jdict.keys() or 'title' in jdict.keys():
-                all_items.add(jdict['asin'])
+            if "description" in jdict.keys() or "title" in jdict.keys():
+                all_items.add(jdict["asin"])
             else:
                 ignore_item += 1
     print(f"Read {len(all_items)} from {meta_file} (ignored {ignore_item} items)")
 
     model_input = os.path.join(data_path, category + ".txt")
-    udict, idict = data_process_with_time(reviews_output, model_input, K, "\t", all_items)
+    udict, idict = data_process_with_time(
+        reviews_output, model_input, K, "\t", all_items
+    )
     if len(udict) == 0 or len(idict) == 0:
         print(f"{len(udict)} users and {len(idict)} items")
         exit()
 
     num_items = len(idict)
     # number to name
-    inv_udict = {v:k for k, v in udict.items()}
-    inv_idict = {v:k for k, v in idict.items()}
+    inv_udict = {v: k for k, v in udict.items()}
+    inv_idict = {v: k for k, v in idict.items()}
 
     # get item descriptions from the meta file
     ddict = {}
-    with open(os.path.join(data_path, meta_name), 'r') as fr:
+    with open(os.path.join(data_path, meta_name), "r") as fr:
         for line in fr.readlines():
             jdict = eval(line)
-            if jdict['asin'] in idict:
-                ddict[jdict['asin']] = {}
-                if 'title' in jdict.keys():
-                    ddict[jdict['asin']]['title'] = jdict['title']
-                if 'description' in jdict.keys():
-                    if type(jdict['description']) is str:
-                        ddict[jdict['asin']]['description'] = jdict['description']
-                    elif type(jdict['description']) is list and len(jdict['description']) > 0:
-                        ddict[jdict['asin']]['description'] = jdict['description'][0]
+            if jdict["asin"] in idict:
+                ddict[jdict["asin"]] = {}
+                if "title" in jdict.keys():
+                    ddict[jdict["asin"]]["title"] = jdict["title"]
+                if "description" in jdict.keys():
+                    if type(jdict["description"]) is str:
+                        ddict[jdict["asin"]]["description"] = jdict["description"]
+                    elif (
+                        type(jdict["description"]) is list
+                        and len(jdict["description"]) > 0
+                    ):
+                        ddict[jdict["asin"]]["description"] = jdict["description"][0]
 
     # print(len(ddict), num_items)
     count = 0
@@ -408,21 +407,21 @@ if __name__ == "__main__":
     print(f"{count} items do not have descriptions and title")
 
     max_len = 0
-    with open(text_file, 'w') as fw:
-        for item_number in range(1, num_items+1):
+    with open(text_file, "w") as fw:
+        for item_number in range(1, num_items + 1):
             item_name = inv_idict[item_number]
             temp_dict = ddict[item_name]
-            title, desc = '', ''
-            if 'title' in temp_dict:
-                title = temp_dict['title'].replace('\n', '')
-            if 'description' in temp_dict:
-                desc = temp_dict['description'].replace('\n', '')
-            otxt = title + ' ' + desc
+            title, desc = "", ""
+            if "title" in temp_dict:
+                title = temp_dict["title"].replace("\n", "")
+            if "description" in temp_dict:
+                desc = temp_dict["description"].replace("\n", "")
+            otxt = title + " " + desc
             if len(otxt.split()) > max_len:
                 max_len = len(otxt.split())
             otxt = nwords(otxt, keep_words)
             if len(otxt) == 0:
-                otxt = 'not available'
-            fw.write(otxt + '\n')
+                otxt = "not available"
+            fw.write(otxt + "\n")
     print(f"Maximum number of words {max_len}")
     print(f"Processed model input data with text in {text_file}")

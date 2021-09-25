@@ -2,46 +2,50 @@ import os
 import time
 import argparse
 import tensorflow as tf
-from sampler import WarpSampler
+import numpy as np
+import pickle
 from tqdm import tqdm
 
+from sampler import WarpSampler
 from sasrec import SASREC
-from sasrec_text import SASREC_TEXT
+from sasrec_plus import SASREC_PLUS
 from ssept import SSEPT
 from util import *
-import pickle
+
 
 def str2bool(s):
-    if s not in {'False', 'True'}:
-        raise ValueError('Not a valid boolean string')
-    return s == 'True'
+    if s not in {"False", "True"}:
+        raise ValueError("Not a valid boolean string")
+    return s == "True"
 
 
 def create_combined_dataset(u, seq, pos, neg, seq_max_len):
     inputs = {}
-    seq = tf.keras.preprocessing.sequence.pad_sequences(seq,
-            padding='pre',
-            truncating='pre',
-            maxlen=seq_max_len)
-    pos = tf.keras.preprocessing.sequence.pad_sequences(pos,
-            padding='pre',
-            truncating='pre',
-            maxlen=seq_max_len)
-    neg = tf.keras.preprocessing.sequence.pad_sequences(neg,
-            padding='pre',
-            truncating='pre',
-            maxlen=seq_max_len)
+    seq = tf.keras.preprocessing.sequence.pad_sequences(
+        seq, padding="pre", truncating="pre", maxlen=seq_max_len
+    )
+    pos = tf.keras.preprocessing.sequence.pad_sequences(
+        pos, padding="pre", truncating="pre", maxlen=seq_max_len
+    )
+    neg = tf.keras.preprocessing.sequence.pad_sequences(
+        neg, padding="pre", truncating="pre", maxlen=seq_max_len
+    )
 
     # print(seq.shape, pos.shape, neg.shape)
     # inputs['input_seq'] = np.concatenate([seq, seq], axis=0)
     # inputs['candidate'] = np.concatenate([pos, neg], axis=0)
-    inputs['users'] = np.expand_dims(np.array(u), axis=-1)
-    inputs['input_seq'] = seq
-    inputs['positive'] = pos
-    inputs['negative'] = neg
+    inputs["users"] = np.expand_dims(np.array(u), axis=-1)
+    inputs["input_seq"] = seq
+    inputs["positive"] = pos
+    inputs["negative"] = neg
 
-    target = np.concatenate([np.repeat(1, seq.shape[0] * seq.shape[1]), 
-                             np.repeat(0, seq.shape[0] * seq.shape[1])], axis=0)
+    target = np.concatenate(
+        [
+            np.repeat(1, seq.shape[0] * seq.shape[1]),
+            np.repeat(0, seq.shape[0] * seq.shape[1]),
+        ],
+        axis=0,
+    )
     target = np.expand_dims(target, axis=-1)
     return inputs, target
 
@@ -49,48 +53,52 @@ def create_combined_dataset(u, seq, pos, neg, seq_max_len):
 def build_tf_dataset(dataset_dict: dict, seq_max_len: int) -> [dict, np.array]:
 
     inputs = {}
-    inputs['input_seq'] = tf.keras.preprocessing.sequence.pad_sequences(
-        dataset_dict['history'], padding='post', truncating='post', maxlen=seq_max_len)
-    inputs['candidate'] = np.array(dataset_dict['candidate'])
+    inputs["input_seq"] = tf.keras.preprocessing.sequence.pad_sequences(
+        dataset_dict["history"], padding="post", truncating="post", maxlen=seq_max_len
+    )
+    inputs["candidate"] = np.array(dataset_dict["candidate"])
 
     # print(inputs)
     # sys.exit("HH")
 
-    output = np.array(dataset_dict['label'])
+    output = np.array(dataset_dict["label"])
 
     return inputs, output
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', required=True)
-parser.add_argument('--train_dir', required=True)
-parser.add_argument('--batch_size', default=128, type=int)
-parser.add_argument('--lr', default=0.001, type=float)
-parser.add_argument('--maxlen', default=50, type=int)
-parser.add_argument('--hidden_units', default=50, type=int)
-parser.add_argument('--num_blocks', default=2, type=int)
-parser.add_argument('--num_epochs', default=201, type=int)
-parser.add_argument('--num_heads', default=1, type=int)
-parser.add_argument('--dropout_rate', default=0.1, type=float)
-parser.add_argument('--l2_emb', default=0.0, type=float)
-parser.add_argument('--num_neg_test', default=100, type=int)
-parser.add_argument('--model_name', default="sasrec", type=str)
+parser.add_argument("--dataset", required=True)
+parser.add_argument("--train_dir", required=True)
+parser.add_argument("--batch_size", default=128, type=int)
+parser.add_argument("--lr", default=0.001, type=float)
+parser.add_argument("--maxlen", default=50, type=int)
+parser.add_argument("--hidden_units", default=50, type=int)
+parser.add_argument("--num_blocks", default=2, type=int)
+parser.add_argument("--num_epochs", default=201, type=int)
+parser.add_argument("--num_heads", default=1, type=int)
+parser.add_argument("--dropout_rate", default=0.1, type=float)
+parser.add_argument("--l2_emb", default=0.0, type=float)
+parser.add_argument("--num_neg_test", default=100, type=int)
+parser.add_argument("--model_name", default="sasrec", type=str)
 
-# for text features
-parser.add_argument('--text_features', default=0, type=int)
-parser.add_argument('--text_maxlen', default=100, type=int)
-parser.add_argument('--vocab_size', default=5000, type=int)
-parser.add_argument('--text_embed', default=50, type=int)
-
+# for additional embeddings
+parser.add_argument("--add_embeddings", default=0, type=int)
 
 args = parser.parse_args()
-if not os.path.isdir(args.dataset + '_' + args.train_dir):
-    os.makedirs(args.dataset + '_' + args.train_dir)
-with open(os.path.join(args.dataset + '_' + args.train_dir, 'args.txt'), 'w') as f:
-    f.write('\n'.join([str(k) + ',' + str(v) for k, v in sorted(vars(args).items(), key=lambda x: x[0])]))
+if not os.path.isdir(args.dataset + "_" + args.train_dir):
+    os.makedirs(args.dataset + "_" + args.train_dir)
+with open(os.path.join(args.dataset + "_" + args.train_dir, "args.txt"), "w") as f:
+    f.write(
+        "\n".join(
+            [
+                str(k) + "," + str(v)
+                for k, v in sorted(vars(args).items(), key=lambda x: x[0])
+            ]
+        )
+    )
 f.close()
 
-f = open(os.path.join(args.dataset + '_' + args.train_dir, 'log.txt'), 'w')
+f = open(os.path.join(args.dataset + "_" + args.train_dir, "log.txt"), "w")
 
 dataset = data_partition(args.dataset)
 [user_train, user_valid, user_test, usernum, itemnum] = dataset
@@ -98,86 +106,94 @@ num_steps = int(len(user_train) / args.batch_size)
 cc = 0.0
 for u in user_train:
     cc += len(user_train[u])
-print('%g Users and %g items' % (usernum, itemnum))
-print('average sequence length: %.2f' % (cc / len(user_train)))
-f.write(f'{usernum} Users and {itemnum} items\n')
-f.write(f'average sequence length: {cc / len(user_train):.2f} \n')
+print("%g Users and %g items" % (usernum, itemnum))
+print("average sequence length: %.2f" % (cc / len(user_train)))
+f.write(f"{usernum} Users and {itemnum} items\n")
+f.write(f"average sequence length: {cc / len(user_train):.2f} \n")
 
-if args.text_features == 1:
-    embed_matrix = text_processing(args)
+if args.add_embeddings == 1:
+    embed_file = os.path.join("data/", args.dataset + "_item_embeddings.pkl")
+    with open(embed_file, "rb") as handle:
+        tensor = pickle.load(handle)
+    print("Embedding matrix:", tensor.shape)
+    embed_matrix = np.zeros((tensor.shape[0] + 1, tensor.shape[1]))
+    embed_matrix[1 : itemnum + 1, :] = tensor
+    del tensor
+
+    # embed_matrix = text_processing(args)
     # item_desc, embed_matrix = text_processing(args)
 else:
     item_desc = None
 
 if args.model_name == "sasrec":
-    if args.text_features == 1:
+    if args.add_embeddings == 1:
         print("Invoking sasrec_text model ... ")
         f.write("Invoking sasrec_text model ... ")
-        model = SASREC_TEXT(item_num=itemnum,
-                    seq_max_len=args.maxlen,
-                    num_blocks=args.num_blocks,
-                    embedding_dim=args.hidden_units,
-                    attention_dim=args.hidden_units,
-                    attention_num_heads=args.num_heads,
-                    dropout_rate=args.dropout_rate,
-                    #    conv_dims = kwargs.get("conv_dims", [100, 100])
-                    l2_reg=args.l2_emb,
-                    num_neg_test=args.num_neg_test,
-                    # max_seq_len_text=args.text_maxlen,
-                    # vocab_size=args.vocab_size,
-                    text_embedding_dimension=args.text_embed,
-                    item_text_embedding_matrix=embed_matrix,
-                    # item_text_sequences=item_desc
+        model = SASREC_PLUS(
+            item_num=itemnum,
+            seq_max_len=args.maxlen,
+            num_blocks=args.num_blocks,
+            embedding_dim=args.hidden_units,
+            attention_dim=args.hidden_units,
+            attention_num_heads=args.num_heads,
+            dropout_rate=args.dropout_rate,
+            #    conv_dims = kwargs.get("conv_dims", [100, 100])
+            l2_reg=args.l2_emb,
+            num_neg_test=args.num_neg_test,
+            item_text_embedding_matrix=embed_matrix,
+            # item_text_sequences=item_desc
         )
 
     else:
         print("Invoking vanilla SASREC model ... ")
         f.write("Invoking vanilla SASREC model ... ")
-        model = SASREC(item_num=itemnum,
-                    seq_max_len=args.maxlen,
-                    num_blocks=args.num_blocks,
-                    embedding_dim=args.hidden_units,
-                    attention_dim=args.hidden_units,
-                    attention_num_heads=args.num_heads,
-                    dropout_rate=args.dropout_rate,
-                    #    conv_dims = kwargs.get("conv_dims", [100, 100])
-                    l2_reg=args.l2_emb,
-                    num_neg_test=args.num_neg_test
+        model = SASREC(
+            item_num=itemnum,
+            seq_max_len=args.maxlen,
+            num_blocks=args.num_blocks,
+            embedding_dim=args.hidden_units,
+            attention_dim=args.hidden_units,
+            attention_num_heads=args.num_heads,
+            dropout_rate=args.dropout_rate,
+            #    conv_dims = kwargs.get("conv_dims", [100, 100])
+            l2_reg=args.l2_emb,
+            num_neg_test=args.num_neg_test,
         )
 elif args.model_name == "ssept":
     print("Invoking SSEPT model ... ")
     f.write("Invoking SSEPT model ... ")
-    model = SSEPT(item_num=itemnum,
-                user_num=usernum,
-                seq_max_len=args.maxlen,
-                num_blocks=args.num_blocks,
-                user_embedding_dim=args.hidden_units,
-                item_embedding_dim=args.hidden_units,
-                attention_dim=args.hidden_units,
-                attention_num_heads=args.num_heads,
-                dropout_rate=args.dropout_rate,
-                l2_reg=args.l2_emb,
-                num_neg_test=args.num_neg_test
+    model = SSEPT(
+        item_num=itemnum,
+        user_num=usernum,
+        seq_max_len=args.maxlen,
+        num_blocks=args.num_blocks,
+        user_embedding_dim=args.hidden_units,
+        item_embedding_dim=args.hidden_units,
+        attention_dim=args.hidden_units,
+        attention_num_heads=args.num_heads,
+        dropout_rate=args.dropout_rate,
+        l2_reg=args.l2_emb,
+        num_neg_test=args.num_neg_test,
     )
 else:
     raise ValueError(f"Unknown model name {args.model_name}")
 
 # optimizer = tf.keras.optimizers.Adam(learning_rate=args.lr, decay=0.9)
-optimizer = tf.keras.optimizers.Adam(learning_rate=args.lr,
-                                        beta_1=0.9,
-                                        beta_2=0.999,
-                                        epsilon=1e-7)
+optimizer = tf.keras.optimizers.Adam(
+    learning_rate=args.lr, beta_1=0.9, beta_2=0.999, epsilon=1e-7
+)
 loss_object = tf.keras.losses.BinaryCrossentropy(from_logits=True)
 # model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
 
+
 def loss_function(pos_logits, neg_logits, istarget):
-    pos_logits = pos_logits[:,0]
-    neg_logits = neg_logits[:,0]
+    pos_logits = pos_logits[:, 0]
+    neg_logits = neg_logits[:, 0]
 
     # for logits
     loss = tf.reduce_sum(
-        - tf.math.log(tf.math.sigmoid(pos_logits) + 1e-24) * istarget -
-        tf.math.log(1 - tf.math.sigmoid(neg_logits) + 1e-24) * istarget
+        -tf.math.log(tf.math.sigmoid(pos_logits) + 1e-24) * istarget
+        - tf.math.log(1 - tf.math.sigmoid(neg_logits) + 1e-24) * istarget
     ) / tf.reduce_sum(istarget)
 
     # for probabilities
@@ -191,6 +207,7 @@ def loss_function(pos_logits, neg_logits, istarget):
     loss += reg_loss
     return loss
 
+
 def loss_function_(real, pred):
     # real and pred are (batch * seq_len, 1)
     # mask = tf.math.equal(pred, 0)
@@ -199,9 +216,10 @@ def loss_function_(real, pred):
     pred = pred[mask]
     loss_ = loss_object(real, pred)
     # mask = tf.cast(mask, dtype=loss_.dtype)
-#     loss_ *= mask
-#     return tf.reduce_sum(loss_)/tf.reduce_sum(mask)
+    #     loss_ *= mask
+    #     return tf.reduce_sum(loss_)/tf.reduce_sum(mask)
     return tf.reduce_mean(loss_)
+
 
 def accuracy_function(real, pred):
     pred_class = tf.where(pred > 0.5, 1, 0)
@@ -210,30 +228,20 @@ def accuracy_function(real, pred):
     accuracies = tf.cast(accuracies, dtype=tf.float32)
     return tf.reduce_mean(accuracies)
 
-train_loss = tf.keras.metrics.Mean(name='train_loss')
-train_accuracy = tf.keras.metrics.Mean(name='train_accuracy')
 
-if args.text_features == 1:
-    train_step_signature = [
-        {'users': tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
-         'input_seq': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
-         'positive': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
-         'negative': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
-        #  'inp_seq_tokens': tf.TensorSpec(shape=(None, args.maxlen, args.text_maxlen), dtype=tf.int64),
-        #  'pos_tokens': tf.TensorSpec(shape=(None, args.maxlen, args.text_maxlen), dtype=tf.int64),
-        #  'neg_tokens': tf.TensorSpec(shape=(None, args.maxlen, args.text_maxlen), dtype=tf.int64),
-        },
-        tf.TensorSpec(shape=(None, 1), dtype=tf.int64)
-    ]
-else:
-    train_step_signature = [
-        {'users': tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
-         'input_seq': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
-         'positive': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
-         'negative': tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64)
-         },
-         tf.TensorSpec(shape=(None, 1), dtype=tf.int64)
-    ]
+train_loss = tf.keras.metrics.Mean(name="train_loss")
+train_accuracy = tf.keras.metrics.Mean(name="train_accuracy")
+
+train_step_signature = [
+    {
+        "users": tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
+        "input_seq": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+        "positive": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+        "negative": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+    },
+    tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
+]
+
 
 @tf.function(input_signature=train_step_signature)
 def train_step(inp, tar):
@@ -243,12 +251,13 @@ def train_step(inp, tar):
         # loss = loss_function_(tar, predictions)
         # loss = model.loss_function(*predictions)
 
-    gradients = tape.gradient(loss, model.trainable_variables)    
+    gradients = tape.gradient(loss, model.trainable_variables)
     optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
     train_loss(loss)
     # train_accuracy(accuracy_function(tar, predictions))
     return loss
+
 
 # with open('sample_nan.pkl', 'rb') as fr:
 #     inputs = pickle.load(fr)
@@ -260,7 +269,14 @@ def train_step(inp, tar):
 # print(out)
 # sys.exit("TEST")
 
-sampler = WarpSampler(user_train, usernum, itemnum, batch_size=args.batch_size, maxlen=args.maxlen, n_workers=3)
+sampler = WarpSampler(
+    user_train,
+    usernum,
+    itemnum,
+    batch_size=args.batch_size,
+    maxlen=args.maxlen,
+    n_workers=3,
+)
 
 T = 0.0
 t0 = time.time()
@@ -270,17 +286,14 @@ for epoch in range(1, args.num_epochs + 1):
 
     step_loss = []
     train_loss.reset_states()
-    for step in tqdm(range(num_steps), total=num_steps, ncols=70, leave=False, unit='b'):
+    for step in tqdm(
+        range(num_steps), total=num_steps, ncols=70, leave=False, unit="b"
+    ):
 
         u, seq, pos, neg = sampler.next_batch()
 
         inputs, target = create_combined_dataset(u, seq, pos, neg, args.maxlen)
-        # if args.text_features == 1:
-        #     inputs['inp_seq_tokens'] = item_desc[seq, :]
-        #     inputs['pos_tokens'] = item_desc[pos, :]
-        #     inputs['neg_tokens'] = item_desc[neg, :]
-            # print(inputs['inp_seq_tokens'].shape)
-        
+
         # print(inputs)
         # out = model(inputs, training=False)
         # print(out)
@@ -303,19 +316,27 @@ for epoch in range(1, args.num_epochs + 1):
         # grads = tape.gradient(loss, model.trainable_variables)
         # optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
-    print(f"Epoch: {epoch}, Train Loss: {np.mean(step_loss):.3f}, {train_loss.result():.3f}")
-    f.write(f"Epoch: {epoch}, Train Loss: {np.mean(step_loss):.3f}, {train_loss.result():.3f}\n")
-        
+    print(
+        f"Epoch: {epoch}, Train Loss: {np.mean(step_loss):.3f}, {train_loss.result():.3f}"
+    )
+    f.write(
+        f"Epoch: {epoch}, Train Loss: {np.mean(step_loss):.3f}, {train_loss.result():.3f}\n"
+    )
+
     if epoch % 5 == 0:
         t1 = time.time() - t0
         T += t1
-        print('Evaluating...')
+        print("Evaluating...")
         t_test = evaluate(model, dataset, args)
         t_valid = evaluate_valid(model, dataset, args)
-        print(f"\nepoch: {epoch}, time: {T}, valid (NDCG@10: {t_valid[0]:.4f}, HR@10: {t_valid[1]:.4f})")
-        print(f"epoch: {epoch}, time: {T},  test (NDCG@10: {t_test[0]:.4f}, HR@10: {t_test[1]:.4f})")
+        print(
+            f"epoch: {epoch}, time: {T}, valid (NDCG@10: {t_valid[0]:.4f}, HR@10: {t_valid[1]:.4f})"
+        )
+        print(
+            f"epoch: {epoch}, time: {T},  test (NDCG@10: {t_test[0]:.4f}, HR@10: {t_test[1]:.4f})"
+        )
 
-        f.write(str(t_valid) + ' ' + str(t_test) + '\n')
+        f.write(str(t_valid) + " " + str(t_test) + "\n")
         f.flush()
         t0 = time.time()
 
