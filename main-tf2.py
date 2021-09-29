@@ -4,13 +4,21 @@ import argparse
 import tensorflow as tf
 import numpy as np
 import pickle
+import sys
 from tqdm import tqdm
 
-from sampler import WarpSampler
+from sampler import WarpSampler, WarpSampler_with_time
 from sasrec import SASREC
 from sasrec_plus import SASREC_PLUS
+from tisasrec import TISASREC
 from ssept import SSEPT
-from util import *
+from util import (
+    data_partition,
+    data_partition_with_time,
+    Relation,
+    evaluate,
+    evaluate_valid,
+)
 
 
 def str2bool(s):
@@ -84,6 +92,10 @@ parser.add_argument("--model_name", default="sasrec", type=str)
 # for additional embeddings
 parser.add_argument("--add_embeddings", default=0, type=int)
 
+# for time-dependent Transformer model
+parser.add_argument("--add_time", default=0, type=int)
+parser.add_argument("--time_span", default=256, type=int)
+
 args = parser.parse_args()
 if not os.path.isdir(args.dataset + "_" + args.train_dir):
     os.makedirs(args.dataset + "_" + args.train_dir)
@@ -100,8 +112,50 @@ f.close()
 
 f = open(os.path.join(args.dataset + "_" + args.train_dir, "log.txt"), "w")
 
-dataset = data_partition(args.dataset)
-[user_train, user_valid, user_test, usernum, itemnum] = dataset
+if args.add_time == 1:
+    dataset = data_partition_with_time(args.dataset)
+    [user_train, user_valid, user_test, usernum, itemnum, timenum] = dataset
+    try:
+        relation_matrix = pickle.load(
+            open(
+                "data/relation_matrix_%s_%d_%d.pickle"
+                % (args.dataset, args.maxlen, args.time_span),
+                "rb",
+            )
+        )
+    except:
+        relation_matrix = Relation(user_train, usernum, args.maxlen, args.time_span)
+        pickle.dump(
+            relation_matrix,
+            open(
+                "data/relation_matrix_%s_%d_%d.pickle"
+                % (args.dataset, args.maxlen, args.time_span),
+                "wb",
+            ),
+        )
+    sampler = WarpSampler_with_time(
+        user_train,
+        usernum,
+        itemnum,
+        relation_matrix,
+        batch_size=args.batch_size,
+        maxlen=args.maxlen,
+        n_workers=3,
+    )
+
+else:
+    dataset = data_partition(args.dataset)
+    [user_train, user_valid, user_test, usernum, itemnum] = dataset
+    sampler = WarpSampler(
+        user_train,
+        usernum,
+        itemnum,
+        batch_size=args.batch_size,
+        maxlen=args.maxlen,
+        n_workers=3,
+    )
+
+
 num_steps = int(len(user_train) / args.batch_size)
 cc = 0.0
 for u in user_train:
@@ -124,6 +178,17 @@ if args.add_embeddings == 1:
     # item_desc, embed_matrix = text_processing(args)
 else:
     item_desc = None
+
+# base input signatures
+train_step_signature = [
+    {
+        "users": tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
+        "input_seq": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+        "positive": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+        "negative": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+    },
+    tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
+]
 
 if args.model_name == "sasrec":
     if args.add_embeddings == 1:
@@ -175,6 +240,35 @@ elif args.model_name == "ssept":
         l2_reg=args.l2_emb,
         num_neg_test=args.num_neg_test,
     )
+elif args.model_name == "tisasrec":
+    print("Invoking TiSASREC model ... ")
+    f.write("Invoking TiSASREC model ... ")
+    model = TISASREC(
+        item_num=itemnum,
+        seq_max_len=args.maxlen,
+        num_blocks=args.num_blocks,
+        embedding_dim=args.hidden_units,
+        attention_dim=args.hidden_units,
+        attention_num_heads=args.num_heads,
+        dropout_rate=args.dropout_rate,
+        l2_reg=args.l2_emb,
+        num_neg_test=args.num_neg_test,
+        time_span=args.time_span,
+    )
+    train_step_signature = [
+        {
+            "users": tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
+            "input_seq": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+            "positive": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+            "negative": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+            "time_matrix": tf.TensorSpec(
+                shape=(None, args.maxlen, args.maxlen), dtype=tf.float32
+            ),
+            # "position": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+        },
+        tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
+    ]
+
 else:
     raise ValueError(f"Unknown model name {args.model_name}")
 
@@ -232,16 +326,6 @@ def accuracy_function(real, pred):
 train_loss = tf.keras.metrics.Mean(name="train_loss")
 train_accuracy = tf.keras.metrics.Mean(name="train_accuracy")
 
-train_step_signature = [
-    {
-        "users": tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
-        "input_seq": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
-        "positive": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
-        "negative": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
-    },
-    tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
-]
-
 
 @tf.function(input_signature=train_step_signature)
 def train_step(inp, tar):
@@ -269,15 +353,6 @@ def train_step(inp, tar):
 # print(out)
 # sys.exit("TEST")
 
-sampler = WarpSampler(
-    user_train,
-    usernum,
-    itemnum,
-    batch_size=args.batch_size,
-    maxlen=args.maxlen,
-    n_workers=3,
-)
-
 T = 0.0
 t0 = time.time()
 
@@ -290,9 +365,16 @@ for epoch in range(1, args.num_epochs + 1):
         range(num_steps), total=num_steps, ncols=70, leave=False, unit="b"
     ):
 
-        u, seq, pos, neg = sampler.next_batch()
-
-        inputs, target = create_combined_dataset(u, seq, pos, neg, args.maxlen)
+        if args.add_time == 1 and args.model_name in ("tisasrec"):
+            u, seq, time_seq, time_matrix, pos, neg = sampler.next_batch()
+            inputs, target = create_combined_dataset(u, seq, pos, neg, args.maxlen)
+            inputs["time_matrix"] = np.array(time_matrix)  # (b, seqlen, seqlen)
+            # inputs["position"] = np.tile(
+            #     np.expand_dims(np.arange(args.maxlen), 0), (len(u), 1)
+            # )
+        else:
+            u, seq, pos, neg = sampler.next_batch()
+            inputs, target = create_combined_dataset(u, seq, pos, neg, args.maxlen)
 
         # print(inputs)
         # out = model(inputs, training=False)
@@ -328,6 +410,8 @@ for epoch in range(1, args.num_epochs + 1):
         T += t1
         print("Evaluating...")
         t_test = evaluate(model, dataset, args)
+        # print(t_test)
+        # sys.exit("HERE")
         t_valid = evaluate_valid(model, dataset, args)
         print(
             f"epoch: {epoch}, time: {T}, valid (NDCG@10: {t_valid[0]:.4f}, HR@10: {t_valid[1]:.4f})"

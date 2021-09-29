@@ -5,9 +5,19 @@ import sys
 
 class MultiHeadAttention(tf.keras.layers.Layer):
     """
-    - Q (query), K (key) and V (value) are split into multiple heads (num_heads)
+
+    :Citation:
+
+    Peter Shaw, Jakob Uszkoreit and Ashish Vaswani (2018),
+    Self-Attention with Relative Position Representations
+
+    - Q (query), K (key) and V (value) are split into multiple heads
     - each tuple (q, k, v) are fed to scaled_dot_product_attention
     - all attention outputs are concatenated
+
+    - there are separate position embeddings and embeddings that
+    take into account of the distance between sequence elements
+
     """
 
     def __init__(self, attention_dim, num_heads, dropout_rate):
@@ -24,7 +34,15 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         self.V = tf.keras.layers.Dense(self.attention_dim, activation=None)
         self.dropout = tf.keras.layers.Dropout(self.dropout_rate)
 
-    def call(self, queries, keys):
+    def call(
+        self,
+        queries,
+        keys,
+        time_matrix_K,
+        time_matrix_V,
+        absolute_pos_K,
+        absolute_pos_V,
+    ):
 
         # Linear projections
         Q = self.Q(queries)  # (N, T_q, C)
@@ -37,9 +55,36 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         K_ = tf.concat(tf.split(K, self.num_heads, axis=2), axis=0)  # (h*N, T_k, C/h)
         V_ = tf.concat(tf.split(V, self.num_heads, axis=2), axis=0)  # (h*N, T_k, C/h)
 
+        time_matrix_K_ = tf.concat(
+            tf.split(time_matrix_K, self.num_heads, axis=3), axis=0
+        )
+        time_matrix_V_ = tf.concat(
+            tf.split(time_matrix_V, self.num_heads, axis=3), axis=0
+        )
+        absolute_pos_K_ = tf.concat(
+            tf.split(absolute_pos_K, self.num_heads, axis=2), axis=0
+        )
+        absolute_pos_V_ = tf.concat(
+            tf.split(absolute_pos_V, self.num_heads, axis=2), axis=0
+        )
+
         # --- SCALED DOT PRODUCT ---
         # Multiplication
         outputs = tf.matmul(Q_, tf.transpose(K_, [0, 2, 1]))  # (h*N, T_q, T_k)
+        # print("0. outputs:", outputs.shape)
+
+        outputs_pos = tf.matmul(Q_, tf.transpose(absolute_pos_K_, [0, 2, 1]))
+        # time_matrix_K_.shape, Q_.shape = (None, 50, 50, 100), (None, 50, 100)
+        Q__ = tf.expand_dims(Q_, axis=-1)
+        outputs_time = tf.matmul(time_matrix_K_, Q__)
+        outputs_time = tf.squeeze(outputs_time, -1)
+        # outputs_time = tf.squeeze(
+        #     tf.matmul(time_matrix_K_, tf.expand_dims(Q_, axis=-1))
+        # )
+        # print("1. outputs:", outputs_time.shape)
+
+        outputs = outputs + outputs_time + outputs_pos
+        # print("2. outputs:", outputs.shape, outputs_time.shape, outputs_pos.shape)
 
         # Scale
         outputs = outputs / (K_.get_shape().as_list()[-1] ** 0.5)
@@ -81,7 +126,14 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         outputs = self.dropout(outputs)
 
         # Weighted sum
-        outputs = tf.matmul(outputs, V_)  # ( h*N, T_q, C/h)
+        outputs_value = tf.matmul(outputs, V_)  # ( h*N, T_q, C/h)
+        outputs_pos_value = tf.matmul(outputs, absolute_pos_V_)
+        output_time_value = tf.reshape(
+            tf.matmul(tf.expand_dims(outputs, axis=2), time_matrix_V_),
+            [tf.shape(outputs_pos)[0], tf.shape(outputs_pos)[1], self.attention_dim],
+        )
+
+        outputs = outputs_value + output_time_value + outputs_pos_value
 
         # --- MULTI HEAD ---
         # concat heads
@@ -105,10 +157,18 @@ class PointWiseFeedForward(tf.keras.layers.Layer):
         self.conv_dims = conv_dims
         self.dropout_rate = dropout_rate
         self.conv_layer1 = tf.keras.layers.Conv1D(
-            filters=self.conv_dims[0], kernel_size=1, activation="relu", use_bias=True
+            filters=self.conv_dims[0],
+            kernel_size=1,
+            activation="relu",
+            use_bias=True,
+            # input_shape=(200, 100),
         )
         self.conv_layer2 = tf.keras.layers.Conv1D(
-            filters=self.conv_dims[1], kernel_size=1, activation=None, use_bias=True
+            filters=self.conv_dims[1],
+            kernel_size=1,
+            activation=None,
+            use_bias=True,
+            # input_shape=(200, 100),
         )
         self.dropout_layer = tf.keras.layers.Dropout(self.dropout_rate)
 
@@ -159,9 +219,25 @@ class EncoderLayer(tf.keras.layers.Layer):
             self.seq_max_len, self.embedding_dim, 1e-08
         )
 
-    def call_(self, x, training, mask):
+    def call_(
+        self,
+        x,
+        time_matrix_emb_K,
+        time_matrix_emb_V,
+        absolute_pos_K,
+        absolute_pos_V,
+        training,
+        mask,
+    ):
 
-        attn_output = self.mha(queries=self.layer_normalization(x), keys=x)
+        attn_output = self.mha(
+            queries=self.layer_normalization(x),
+            keys=x,
+            time_matrix_K=time_matrix_emb_K,
+            time_matrix_V=time_matrix_emb_V,
+            absolute_pos_K=absolute_pos_K,
+            absolute_pos_V=absolute_pos_V,
+        )
         attn_output = self.dropout1(attn_output, training=training)
         out1 = self.layernorm1(x + attn_output)
 
@@ -177,10 +253,26 @@ class EncoderLayer(tf.keras.layers.Layer):
 
         return out2
 
-    def call(self, x, training, mask):
+    def call(
+        self,
+        x,
+        time_matrix_emb_K,
+        time_matrix_emb_V,
+        absolute_pos_K,
+        absolute_pos_V,
+        training,
+        mask,
+    ):
 
         x_norm = self.layer_normalization(x)
-        attn_output = self.mha(queries=x_norm, keys=x)
+        attn_output = self.mha(
+            queries=x_norm,
+            keys=x,
+            time_matrix_K=time_matrix_emb_K,
+            time_matrix_V=time_matrix_emb_V,
+            absolute_pos_K=absolute_pos_K,
+            absolute_pos_V=absolute_pos_V,
+        )
         attn_output = self.ffn(attn_output)
         out = attn_output * mask
 
@@ -221,10 +313,37 @@ class Encoder(tf.keras.layers.Layer):
 
         self.dropout = tf.keras.layers.Dropout(dropout_rate)
 
-    def call(self, x, training, mask):
+    def call(
+        self,
+        x,
+        tm_emb_K,
+        tm_emb_V,
+        pos_K,
+        pos_V,
+        training,
+        mask,
+    ):
+
+        time_matrix_emb_K = tm_emb_K
+        time_matrix_emb_V = tm_emb_V
+        absolute_pos_K = pos_K
+        absolute_pos_V = pos_V
+        # it is important to check the rank of the resulting
+        # matrices and there should be only one None that
+        # corresponds to the batch size
 
         for i in range(self.num_layers):
-            x = self.enc_layers[i](x, training, mask)
+            # print("begin-x:", x.shape)
+            x = self.enc_layers[i](
+                x,
+                time_matrix_emb_K,
+                time_matrix_emb_V,
+                absolute_pos_K,
+                absolute_pos_V,
+                training,
+                mask,
+            )
+            # print("after-x:", x.shape)
 
         return x  # (batch_size, input_seq_len, d_model)
 
@@ -259,17 +378,16 @@ class LayerNormalization(tf.keras.layers.Layer):
         return output
 
 
-class SASREC(tf.keras.Model):
-    """SAS Rec model
-    Self-Attentive Sequential Recommendation Using Transformer
+class TISASREC(tf.keras.Model):
+    """TiSASRec model
+    Self-Attentive Sequential Recommendation Using Time-Interval Aware Transformer
 
     :Citation:
 
-        Wang-Cheng Kang, Julian McAuley (2018), Self-Attentive Sequential
-        Recommendation. Proceedings of IEEE International Conference on
-        Data Mining (ICDM'18)
+        Jiacheng Li, Yujie Wang and Julian McAuley (2020),
+        Time Interval Aware Self-Attention for Sequential Recommendation (WSDM'20)
 
-        Original source code from nnkkmto/SASRec-tf2, https://github.com/nnkkmto/SASRec-tf2
+        Original source code in TF1.x: https://github.com/JiachengLi1995/TiSASRec
 
     Args:
         item_num: number of items in the dataset
@@ -284,7 +402,7 @@ class SASREC(tf.keras.Model):
     """
 
     def __init__(self, **kwargs):
-        super(SASREC, self).__init__()
+        super(TISASREC, self).__init__()
 
         self.item_num = kwargs.get("item_num", None)
         self.seq_max_len = kwargs.get("seq_max_len", 100)
@@ -296,6 +414,7 @@ class SASREC(tf.keras.Model):
         self.dropout_rate = kwargs.get("dropout_rate", 0.5)
         self.l2_reg = kwargs.get("l2_reg", 0.0)
         self.num_neg_test = kwargs.get("num_neg_test", 100)
+        self.time_span = kwargs.get("time_span", 256)
 
         self.item_embedding_layer = tf.keras.layers.Embedding(
             self.item_num + 1,
@@ -305,13 +424,42 @@ class SASREC(tf.keras.Model):
             embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
         )
 
-        self.positional_embedding_layer = tf.keras.layers.Embedding(
+        # position embeddings for key
+        self.positional_embedding_layer_K = tf.keras.layers.Embedding(
             self.seq_max_len,
             self.embedding_dim,
-            name="positional_embeddings",
+            name="positional_embeddings_K",
             mask_zero=False,
             embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
         )
+
+        # position embeddings for value
+        self.positional_embedding_layer_V = tf.keras.layers.Embedding(
+            self.seq_max_len,
+            self.embedding_dim,
+            name="positional_embeddings_V",
+            mask_zero=False,
+            embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
+        )
+
+        # embedding for time interval (key)
+        self.time_matrix_embedding_layer_K = tf.keras.layers.Embedding(
+            input_dim=self.time_span + 1,
+            output_dim=self.embedding_dim,
+            name="time_embeddings_K",
+            mask_zero=False,
+            embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
+        )
+
+        # embedding for time interval (value)
+        self.time_matrix_embedding_layer_V = tf.keras.layers.Embedding(
+            input_dim=self.time_span + 1,
+            output_dim=self.embedding_dim,
+            name="time_embeddings_V",
+            mask_zero=False,
+            embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
+        )
+
         self.dropout_layer = tf.keras.layers.Dropout(self.dropout_rate)
         self.encoder = Encoder(
             self.num_blocks,
@@ -329,39 +477,59 @@ class SASREC(tf.keras.Model):
 
     def embedding(self, input_seq):
 
+        # input_seq is (None, seq_len)
         seq_embeddings = self.item_embedding_layer(input_seq)
         seq_embeddings = seq_embeddings * (
             self.embedding_dim ** 0.5
         )  # should be added?
 
-        # FIXME
         positional_seq = tf.expand_dims(tf.range(tf.shape(input_seq)[1]), 0)
         positional_seq = tf.tile(positional_seq, [tf.shape(input_seq)[0], 1])
-        positional_embeddings = self.positional_embedding_layer(positional_seq)
 
-        return seq_embeddings, positional_embeddings
+        positional_embeddings_K = self.positional_embedding_layer_K(positional_seq)
+        positional_embeddings_V = self.positional_embedding_layer_V(positional_seq)
+
+        return seq_embeddings, positional_embeddings_K, positional_embeddings_V
 
     def call(self, x, training):
 
         input_seq = x["input_seq"]
         pos = x["positive"]
         neg = x["negative"]
+        tm = x["time_matrix"]
+        # pos = x["position"]
 
         mask = tf.expand_dims(tf.cast(tf.not_equal(input_seq, 0), tf.float32), -1)
-        seq_embeddings, positional_embeddings = self.embedding(input_seq)
+        (
+            seq_embeddings,
+            absolute_pos_K,
+            absolute_pos_V,
+        ) = self.embedding(input_seq)
 
-        # add positional embeddings
-        seq_embeddings += positional_embeddings
+        time_matrix_emb_K = self.time_matrix_embedding_layer_K(tm)
+        time_matrix_emb_V = self.time_matrix_embedding_layer_V(tm)
 
-        # dropout
-        seq_embeddings = self.dropout_layer(seq_embeddings)
-
-        # masking
+        # dropout & masking
+        seq_embeddings = self.dropout_layer(seq_embeddings, training=training)
         seq_embeddings *= mask
 
+        # dropout & masking
+        time_matrix_emb_K = self.dropout_layer(time_matrix_emb_K, training=training)
+        time_matrix_emb_V = self.dropout_layer(time_matrix_emb_V, training=training)
+        absolute_pos_K = self.dropout_layer(absolute_pos_K, training=training)
+        absolute_pos_V = self.dropout_layer(absolute_pos_V, training=training)
+
         # --- ATTENTION BLOCKS ---
-        seq_attention = seq_embeddings
-        seq_attention = self.encoder(seq_attention, training, mask)
+        seq_attention = seq_embeddings  # (b, seqlen, hidden_dim)
+        seq_attention = self.encoder(
+            seq_attention,
+            time_matrix_emb_K,
+            time_matrix_emb_V,
+            absolute_pos_K,
+            absolute_pos_V,
+            training,
+            mask,
+        )  # (b, seqlen, hidden_dim)
         seq_attention = self.layer_normalization(seq_attention)  # (b, s, d)
 
         # --- PREDICTION LAYER ---
@@ -401,19 +569,44 @@ class SASREC(tf.keras.Model):
         training = False
         input_seq = inputs["input_seq"]
         candidate = inputs["candidate"]
+        tm = inputs["time_matrix"]
 
         mask = tf.expand_dims(tf.cast(tf.not_equal(input_seq, 0), tf.float32), -1)
-        seq_embeddings, positional_embeddings = self.embedding(input_seq)
-        seq_embeddings += positional_embeddings
-        # seq_embeddings = self.dropout_layer(seq_embeddings)
+        (
+            seq_embeddings,
+            absolute_pos_K,
+            absolute_pos_V,
+        ) = self.embedding(input_seq)
+        time_matrix_emb_K = self.time_matrix_embedding_layer_K(tm)
+        time_matrix_emb_V = self.time_matrix_embedding_layer_V(tm)
+
+        # dropout & masking
+        seq_embeddings = self.dropout_layer(seq_embeddings, training=training)
         seq_embeddings *= mask
-        seq_attention = seq_embeddings
-        seq_attention = self.encoder(seq_attention, training, mask)
+
+        time_matrix_emb_K = self.dropout_layer(time_matrix_emb_K, training=training)
+        time_matrix_emb_V = self.dropout_layer(time_matrix_emb_V, training=training)
+        absolute_pos_K = self.dropout_layer(absolute_pos_K, training=training)
+        absolute_pos_V = self.dropout_layer(absolute_pos_V, training=training)
+
+        # --- ATTENTION BLOCKS ---
+        seq_attention = seq_embeddings  # (b, seqlen, hidden_dim)
+        seq_attention = self.encoder(
+            seq_attention,
+            time_matrix_emb_K,
+            time_matrix_emb_V,
+            absolute_pos_K,
+            absolute_pos_V,
+            training,
+            mask,
+        )  # (b, seqlen, hidden_dim)
         seq_attention = self.layer_normalization(seq_attention)  # (b, s, d)
+
         seq_emb = tf.reshape(
             seq_attention,
             [tf.shape(input_seq)[0] * self.seq_max_len, self.embedding_dim],
         )  # (b*s, d)
+
         candidate_emb = self.item_embedding_layer(candidate)  # (b, s, d)
         candidate_emb = tf.transpose(candidate_emb, perm=[0, 2, 1])  # (b, d, s)
         # print(seq_emb.shape, candidate_emb.shape)

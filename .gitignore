@@ -6,6 +6,7 @@ data/*.json_output
 data/*.txt
 data/*.gz
 data/*.pkl
+data/*.pickle
 ae_*
 Beauty_*
 All_*

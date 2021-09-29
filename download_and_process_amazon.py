@@ -224,7 +224,118 @@ def parse(path):
         yield eval(line)
 
 
-def data_process_with_time(fname, pname, K=10, sep=" ", item_set=None):
+def timeSlice(time_set):
+    time_min = min(time_set)
+    time_map = dict()
+    for time in time_set:
+        time_map[time] = int(round(float(time - time_min)))
+    return time_map
+
+
+def cleanAndsort(User, time_map):
+    User_filted = dict()
+    user_set = set()
+    item_set = set()
+    for user, items in User.items():
+        user_set.add(user)
+        User_filted[user] = items
+        for item in items:
+            item_set.add(item[0])
+    user_map = dict()
+    item_map = dict()
+    for u, user in enumerate(user_set):
+        user_map[user] = u + 1
+    for i, item in enumerate(item_set):
+        item_map[item] = i + 1
+
+    for user, items in User_filted.items():
+        User_filted[user] = sorted(items, key=lambda x: x[1])
+
+    User_res = dict()
+    for user, items in User_filted.items():
+        User_res[user_map[user]] = list(
+            map(lambda x: [item_map[x[0]], time_map[x[1]]], items)
+        )
+
+    time_max = set()
+    for user, items in User_res.items():
+        time_list = list(map(lambda x: x[1], items))
+        time_diff = set()
+        for i in range(len(time_list) - 1):
+            if time_list[i + 1] - time_list[i] != 0:
+                time_diff.add(time_list[i + 1] - time_list[i])
+        if len(time_diff) == 0:
+            time_scale = 1
+        else:
+            time_scale = min(time_diff)
+        time_min = min(time_list)
+        User_res[user] = list(
+            map(lambda x: [x[0], int(round((x[1] - time_min) / time_scale) + 1)], items)
+        )
+        time_max.add(max(set(map(lambda x: x[1], User_res[user]))))
+
+    return User_res, len(user_set), len(item_set), max(time_max)
+
+
+def data_partition(fname):
+    usernum = 0
+    itemnum = 0
+    User = defaultdict(list)
+    user_train = {}
+    user_valid = {}
+    user_test = {}
+
+    print("Preparing data...")
+    f = open(fname, "r")
+    time_set = set()
+
+    user_count = defaultdict(int)
+    item_count = defaultdict(int)
+    for line in f:
+        try:
+            u, i, rating, timestamp = line.rstrip().split("\t")
+        except:
+            u, i, timestamp = line.rstrip().split("\t")
+        u = int(u)
+        i = int(i)
+        user_count[u] += 1
+        item_count[i] += 1
+    f.close()
+    f = open(fname, "r")
+    for line in f:
+        try:
+            u, i, rating, timestamp = line.rstrip().split("\t")
+        except:
+            u, i, timestamp = line.rstrip().split("\t")
+        u = int(u)
+        i = int(i)
+        timestamp = float(timestamp)
+        if user_count[u] < 5 or item_count[i] < 5:
+            continue
+        time_set.add(timestamp)
+        User[u].append([i, timestamp])
+    f.close()
+    time_map = timeSlice(time_set)
+
+    User, usernum, itemnum, timenum = cleanAndsort(User, time_map)
+
+    for user in User:
+        nfeedback = len(User[user])
+        if nfeedback < 3:
+            user_train[user] = User[user]
+            user_valid[user] = []
+            user_test[user] = []
+        else:
+            user_train[user] = User[user][:-2]
+            user_valid[user] = []
+            user_valid[user].append(User[user][-2])
+            user_test[user] = []
+            user_test[user].append(User[user][-1])
+    print("Preparing done...")
+    return [user_train, user_valid, user_test, usernum, itemnum, timenum]
+
+
+def data_process_with_time(fname, pname, K=10, sep=" ", item_set=None, add_time=False):
     User = defaultdict(list)
     Users = set()
     Items = set()
@@ -255,7 +366,7 @@ def data_process_with_time(fname, pname, K=10, sep=" ", item_set=None):
         if item_counter[item] < K:
             count_remove += 1
             remove_items.add(item)
-        elif item not in item_set:
+        elif item_set and item not in item_set:
             count_missing += 1
             remove_items.add(item)
 
@@ -300,9 +411,13 @@ def data_process_with_time(fname, pname, K=10, sep=" ", item_set=None):
                 items = sorted(items, key=lambda x: x[1])
 
                 # replace by the item-code
+                timestamps = [x[1] for x in items]
                 items = [item_dict[x[0]] for x in items]
-                for item in items:
-                    fw.write(str(user_count) + " " + str(item) + "\n")
+                for i, t in zip(items, timestamps):
+                    out_txt = [str(user_count), str(i)]
+                    if add_time:
+                        out_txt.append(str(t))
+                    fw.write(sep.join(out_txt) + "\n")
                 user_count += 1
 
     print(f"Total {user_count-1} users, {count_del} removed")

@@ -3,12 +3,23 @@ import sys
 import copy
 import random
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 from collections import defaultdict
+import sys
+import pickle
+
 from tqdm import tqdm
 
-from tensorflow.keras.preprocessing.text import Tokenizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
+# from tensorflow.keras.preprocessing.text import Tokenizer
+# from tensorflow.keras.preprocessing.sequence import pad_sequences
+
+from metric import ndcg_at_k, recall_at_k
+
+COL_USER = "UserId"
+COL_ITEM = "ItemId"
+COL_RATING = "Rating"
+COL_PREDICTION = "Rating"
 
 
 def create_embedding_matrix(filepath, word_index, embedding_dim, vocab_size):
@@ -88,7 +99,10 @@ def data_partition(fname):
     # assume user/item index starting from 1
     f = open("data/%s.txt" % fname, "r")
     for line in f:
-        u, i = line.rstrip().split(" ")
+        try:
+            u, i = line.rstrip().split(" ")
+        except:
+            u, i, timestamp = line.rstrip().split("\t")
         u = int(u)
         i = int(i)
         usernum = max(u, usernum)
@@ -110,33 +124,103 @@ def data_partition(fname):
     return [user_train, user_valid, user_test, usernum, itemnum]
 
 
-def data_partition_with_time(fname, sep=" "):
+def timeSlice(time_set):
+    time_min = min(time_set)
+    time_map = dict()
+    for time in time_set:
+        time_map[time] = int(round(float(time - time_min)))
+    return time_map
+
+
+def cleanAndsort(User, time_map):
+    User_filted = dict()
+    user_set = set()
+    item_set = set()
+    for user, items in User.items():
+        user_set.add(user)
+        User_filted[user] = items
+        for item in items:
+            item_set.add(item[0])
+    user_map = dict()
+    item_map = dict()
+    for u, user in enumerate(user_set):
+        user_map[user] = u + 1
+    for i, item in enumerate(item_set):
+        item_map[item] = i + 1
+
+    for user, items in User_filted.items():
+        User_filted[user] = sorted(items, key=lambda x: x[1])
+
+    User_res = dict()
+    for user, items in User_filted.items():
+        User_res[user_map[user]] = list(
+            map(lambda x: [item_map[x[0]], time_map[x[1]]], items)
+        )
+
+    time_max = set()
+    for user, items in User_res.items():
+        time_list = list(map(lambda x: x[1], items))
+        time_diff = set()
+        for i in range(len(time_list) - 1):
+            if time_list[i + 1] - time_list[i] != 0:
+                time_diff.add(time_list[i + 1] - time_list[i])
+        if len(time_diff) == 0:
+            time_scale = 1
+        else:
+            time_scale = min(time_diff)
+        time_min = min(time_list)
+        User_res[user] = list(
+            map(lambda x: [x[0], int(round((x[1] - time_min) / time_scale) + 1)], items)
+        )
+        time_max.add(max(set(map(lambda x: x[1], User_res[user]))))
+
+    return User_res, len(user_set), len(item_set), max(time_max)
+
+
+def data_partition_with_time(fname):
     usernum = 0
     itemnum = 0
     User = defaultdict(list)
-    Items = set()
     user_train = {}
     user_valid = {}
     user_test = {}
-    # assume user/item index starting from 1
+
+    print("Preparing data...")
     f = open("data/%s.txt" % fname, "r")
+    time_set = set()
 
+    user_count = defaultdict(int)
+    item_count = defaultdict(int)
     for line in f:
-        u, i, t = line.rstrip().split(sep)
-        User[u].append((i, t))
-        Items.add(i)
-
-    for user in User.keys():
-        # sort by time
-        items = sorted(User[user], key=lambda x: x[1])
-        # keep only the items
-        items = [x[0] for x in items]
-        User[user] = items
-        nfeedback = len(User[user])
-        if nfeedback == 1:
-            del User[user]
+        try:
+            u, i, rating, timestamp = line.rstrip().split("\t")
+        except:
+            u, i, timestamp = line.rstrip().split("\t")
+        u = int(u)
+        i = int(i)
+        user_count[u] += 1
+        item_count[i] += 1
+    f.close()
+    f = open("data/%s.txt" % fname, "r")
+    for line in f:
+        try:
+            u, i, rating, timestamp = line.rstrip().split("\t")
+        except:
+            u, i, timestamp = line.rstrip().split("\t")
+        u = int(u)
+        i = int(i)
+        timestamp = float(timestamp)
+        if user_count[u] < 5 or item_count[i] < 5:
             continue
-        elif nfeedback < 3:
+        time_set.add(timestamp)
+        User[u].append([i, timestamp])
+    f.close()
+    time_map = timeSlice(time_set)
+    User, usernum, itemnum, timenum = cleanAndsort(User, time_map)
+
+    for user in User:
+        nfeedback = len(User[user])
+        if nfeedback < 3:
             user_train[user] = User[user]
             user_valid[user] = []
             user_test[user] = []
@@ -146,13 +230,16 @@ def data_partition_with_time(fname, sep=" "):
             user_valid[user].append(User[user][-2])
             user_test[user] = []
             user_test[user].append(User[user][-1])
-
-    usernum = len(User)
-    itemnum = len(Items)
-    return [user_train, user_valid, user_test, usernum, itemnum]
+    print("Preparing done...")
+    return [user_train, user_valid, user_test, usernum, itemnum, timenum]
 
 
 def evaluate(model, dataset, args):
+
+    if args.add_time == 1:
+        res = evaluate_with_time(model, dataset, args)
+        return res
+
     [train, valid, test, usernum, itemnum] = copy.deepcopy(dataset)
 
     NDCG = 0.0
@@ -163,6 +250,18 @@ def evaluate(model, dataset, args):
         users = random.sample(range(1, usernum + 1), 10000)
     else:
         users = range(1, usernum + 1)
+
+    df_true = {
+        COL_USER: [],
+        COL_ITEM: [],
+        COL_RATING: [],
+    }
+
+    df_pred = {
+        COL_USER: [],
+        COL_ITEM: [],
+        COL_PREDICTION: [],
+    }
 
     for u in tqdm(users, ncols=70, leave=False, unit="b"):
 
@@ -191,15 +290,26 @@ def evaluate(model, dataset, args):
         inputs["user"] = np.expand_dims(np.array([u]), axis=-1)
         inputs["input_seq"] = np.array([seq])
         inputs["candidate"] = np.array([item_idx])
-        # if args.text_features == 1:
-        #     inputs['inp_seq_tokens'] = item2text[inputs['input_seq'], :]
-        #     inputs['candidate_tokens'] = item2text[inputs['candidate'], :]
 
         # inverse to get descending sort
         predictions = -1.0 * model.predict(inputs)
         predictions = np.array(predictions)
         predictions = predictions[0]
 
+        # user_list = [u for _ in range(args.num_neg_test + 1)]
+        # item_list = copy.deepcopy(item_idx)
+        # rating_list = [1] + [0] * args.num_neg_test
+        # pred_list = predictions.tolist()
+
+        # df_true[COL_USER] += user_list
+        # df_true[COL_ITEM] += item_list
+        # df_true[COL_RATING] += rating_list
+
+        # df_pred[COL_USER] += user_list
+        # df_pred[COL_ITEM] += item_list
+        # df_pred[COL_PREDICTION] += pred_list
+
+        # double sorting trick to get the rank
         rank = predictions.argsort().argsort()[0]
 
         valid_user += 1
@@ -211,10 +321,45 @@ def evaluate(model, dataset, args):
         #     print('.', end="")
         #     sys.stdout.flush()
 
+        # df_true = pd.DataFrame(df_true)
+        # df_pred = pd.DataFrame(df_pred)
+        # ndcg = ndcg_at_k(
+        #     rating_true=df_true,
+        #     rating_pred=df_pred,
+        #     col_user=COL_USER,
+        #     col_item=COL_ITEM,
+        #     col_rating=COL_RATING,
+        #     col_prediction=COL_PREDICTION,
+        #     relevancy_method="top_k",
+        #     k=10,
+        #     threshold=101,
+        # )
+        # recall = recall_at_k(
+        #     rating_true=df_true,
+        #     rating_pred=df_pred,
+        #     col_user=COL_USER,
+        #     col_item=COL_ITEM,
+        #     col_rating=COL_RATING,
+        #     col_prediction=COL_PREDICTION,
+        #     relevancy_method="top_k",
+        #     k=10,
+        #     threshold=101,
+        # )
+        # print(f"\nNDCG@10: {ndcg}, Hit@10: {recall}")
+        # print(f"NDCG@10: {NDCG}, Hit@10: {HT}")
+        # with open("data/sample.pkl", "wb") as handle:
+        #     pickle.dump((df_true, df_pred), handle, protocol=pickle.HIGHEST_PROTOCOL)
+        # sys.exit("TEST")
+
     return NDCG / valid_user, HT / valid_user
 
 
 def evaluate_valid(model, dataset, args):
+
+    if args.add_time == 1:
+        res = evaluate_valid_with_time(model, dataset, args)
+        return res
+
     [train, valid, test, usernum, itemnum] = copy.deepcopy(dataset)
 
     NDCG = 0.0
@@ -268,5 +413,156 @@ def evaluate_valid(model, dataset, args):
         # if valid_user % 100 == 0:
         #     print('.', end="")
         #     sys.stdout.flush()
+
+    return NDCG / valid_user, HT / valid_user
+
+
+def computeRePos(time_seq, time_span):
+
+    size = time_seq.shape[0]
+    time_matrix = np.zeros([size, size], dtype=np.int32)
+    for i in range(size):
+        for j in range(size):
+            span = abs(time_seq[i] - time_seq[j])
+            if span > time_span:
+                time_matrix[i][j] = time_span
+            else:
+                time_matrix[i][j] = span
+    return time_matrix
+
+
+def Relation(user_train, usernum, maxlen, time_span):
+    data_train = dict()
+    for user in tqdm(range(1, usernum + 1), desc="Preparing relation matrix"):
+        time_seq = np.zeros([maxlen], dtype=np.int32)
+        idx = maxlen - 1
+        for i in reversed(user_train[user][:-1]):
+            time_seq[idx] = i[1]
+            idx -= 1
+            if idx == -1:
+                break
+        data_train[user] = computeRePos(time_seq, time_span)
+    return data_train
+
+
+def evaluate_with_time(model, dataset, args):
+    [train, valid, test, usernum, itemnum, timenum] = copy.deepcopy(dataset)
+
+    NDCG = 0.0
+    HT = 0.0
+    valid_user = 0.0
+
+    if usernum > 10000:
+        users = random.sample(range(1, usernum + 1), 10000)
+    else:
+        users = range(1, usernum + 1)
+
+    for u in tqdm(users, ncols=70, leave=False, unit="b"):
+
+        if len(train[u]) < 1 or len(test[u]) < 1:
+            continue
+
+        seq = np.zeros([args.maxlen], dtype=np.int32)
+        time_seq = np.zeros([args.maxlen], dtype=np.int32)
+        idx = args.maxlen - 1
+
+        seq[idx] = valid[u][0][0]
+        time_seq[idx] = valid[u][0][1]
+        idx -= 1
+        for i in reversed(train[u]):
+            seq[idx] = i[0]
+            time_seq[idx] = i[1]
+            idx -= 1
+            if idx == -1:
+                break
+        rated = set(map(lambda x: x[0], train[u]))
+        rated.add(valid[u][0][0])
+        rated.add(test[u][0][0])
+        rated.add(0)
+        item_idx = [test[u][0][0]]
+        for _ in range(args.num_neg_test):
+            t = np.random.randint(1, itemnum + 1)
+            while t in rated:
+                t = np.random.randint(1, itemnum + 1)
+            item_idx.append(t)
+
+        time_matrix = computeRePos(time_seq, args.time_span)
+
+        inputs = {}
+        inputs["user"] = np.expand_dims(np.array([u]), axis=-1)
+        inputs["input_seq"] = np.array([seq])
+        inputs["candidate"] = np.array([item_idx])
+        inputs["time_matrix"] = np.array([time_matrix])
+
+        # inverse to get descending sort
+        predictions = -1.0 * model.predict(inputs)
+        predictions = np.array(predictions)
+        predictions = predictions[0]
+
+        rank = predictions.argsort().argsort()[0]
+
+        valid_user += 1
+
+        if rank < 10:
+            NDCG += 1 / np.log2(rank + 2)
+            HT += 1
+
+    return NDCG / valid_user, HT / valid_user
+
+
+def evaluate_valid_with_time(model, dataset, args):
+    [train, valid, test, usernum, itemnum, timenum] = copy.deepcopy(dataset)
+
+    NDCG = 0.0
+    valid_user = 0.0
+    HT = 0.0
+    if usernum > 10000:
+        users = random.sample(range(1, usernum + 1), 10000)
+    else:
+        users = range(1, usernum + 1)
+
+    for u in tqdm(users, ncols=70, leave=False, unit="b"):
+        if len(train[u]) < 1 or len(valid[u]) < 1:
+            continue
+
+        seq = np.zeros([args.maxlen], dtype=np.int32)
+        time_seq = np.zeros([args.maxlen], dtype=np.int32)
+        idx = args.maxlen - 1
+        for i in reversed(train[u]):
+            seq[idx] = i[0]
+            time_seq[idx] = i[1]
+            idx -= 1
+            if idx == -1:
+                break
+
+        rated = set(map(lambda x: x[0], train[u]))
+        rated.add(valid[u][0][0])
+        rated.add(0)
+        item_idx = [valid[u][0][0]]
+        for _ in range(100):
+            t = np.random.randint(1, itemnum + 1)
+            while t in rated:
+                t = np.random.randint(1, itemnum + 1)
+            item_idx.append(t)
+
+        time_matrix = computeRePos(time_seq, args.time_span)
+        inputs = {}
+        inputs["user"] = np.expand_dims(np.array([u]), axis=-1)
+        inputs["input_seq"] = np.array([seq])
+        inputs["candidate"] = np.array([item_idx])
+        inputs["time_matrix"] = np.array([time_matrix])
+
+        # inverse to get descending sort
+        predictions = -1.0 * model.predict(inputs)
+        predictions = np.array(predictions)
+        predictions = predictions[0]
+
+        rank = predictions.argsort().argsort()[0]
+
+        valid_user += 1
+
+        if rank < 10:
+            NDCG += 1 / np.log2(rank + 2)
+            HT += 1
 
     return NDCG / valid_user, HT / valid_user
