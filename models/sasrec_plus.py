@@ -1,7 +1,7 @@
 import tensorflow as tf
 import numpy as np
 import sys
-from sasrec import SASREC
+from .sasrec import SASREC
 
 
 class TextEncoder(tf.keras.layers.Layer):

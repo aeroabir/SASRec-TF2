@@ -161,3 +161,92 @@ class WarpSampler_with_time(object):
         for p in self.processors:
             p.terminate()
             p.join()
+
+
+def sample_function_graph(
+    user_train,
+    usernum,
+    itemnum,
+    batch_size,
+    maxlen,
+    maxlen2,
+    result_queue,
+    SEED,
+):
+    def sample():
+
+        user = np.random.randint(1, usernum + 1)
+        while len(user_train[user]) <= 1:
+            user = np.random.randint(1, usernum + 1)
+
+        seq = np.zeros([maxlen], dtype=np.int32)
+        his = np.zeros([maxlen, maxlen2], dtype=np.int32)
+        pos = np.zeros([maxlen], dtype=np.int32)
+        neg = np.zeros([maxlen], dtype=np.int32)
+        nxt = user_train[user][-1]
+        idx = maxlen - 1
+
+        # ts = set(user_train[user])
+        ts = set([x[0] for x in user_train[user]])  # positive items
+        for i in reversed(user_train[user][:-1]):
+            seq[idx] = i[0]
+            num_users = len(i[1])
+            his[idx][maxlen2 - num_users :] = i[1]
+            pos[idx] = nxt[0]
+            if nxt[0] != 0:
+                neg[idx] = random_neq(1, itemnum + 1, ts)
+            nxt = i
+            idx -= 1
+            if idx == -1:
+                break
+
+        return (user, seq, his, pos, neg)
+
+    np.random.seed(SEED)
+    while True:
+        one_batch = []
+        for i in range(batch_size):
+            one_batch.append(sample())
+
+        result_queue.put(zip(*one_batch))
+
+
+class WarpSampler_with_graph(object):
+    def __init__(
+        self,
+        User,
+        usernum,
+        itemnum,
+        batch_size=64,
+        maxlen=10,
+        maxlen2=10,
+        n_workers=1,
+    ):
+        self.result_queue = Queue(maxsize=n_workers * 10)
+        self.processors = []
+        for i in range(n_workers):
+            self.processors.append(
+                Process(
+                    target=sample_function_graph,
+                    args=(
+                        User,
+                        usernum,
+                        itemnum,
+                        batch_size,
+                        maxlen,
+                        maxlen2,
+                        self.result_queue,
+                        np.random.randint(2e9),
+                    ),
+                )
+            )
+            self.processors[-1].daemon = True
+            self.processors[-1].start()
+
+    def next_batch(self):
+        return self.result_queue.get()
+
+    def close(self):
+        for p in self.processors:
+            p.terminate()
+            p.join()

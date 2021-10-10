@@ -7,14 +7,17 @@ import pickle
 import sys
 from tqdm import tqdm
 
-from sampler import WarpSampler, WarpSampler_with_time
-from sasrec import SASREC
-from sasrec_plus import SASREC_PLUS
-from tisasrec import TISASREC
-from ssept import SSEPT
+from sampler import WarpSampler, WarpSampler_with_time, WarpSampler_with_graph
+from models.sasrec import SASREC
+from models.sasrec_plus import SASREC_PLUS
+from models.hsasrec import HSASREC
+from models.tisasrec import TISASREC
+from models.ssept import SSEPT
+from models.rnn import RNNREC
 from util import (
     data_partition,
     data_partition_with_time,
+    data_partition_with_graph,
     Relation,
     evaluate,
     evaluate_valid,
@@ -96,6 +99,14 @@ parser.add_argument("--add_embeddings", default=0, type=int)
 parser.add_argument("--add_time", default=0, type=int)
 parser.add_argument("--time_span", default=256, type=int)
 
+# RNN based
+parser.add_argument("--rnn_name", default="gru", type=str)
+
+# user-history based
+parser.add_argument("--add_history", default=0, type=int)
+parser.add_argument("--user_len", default=50, type=int)
+
+
 args = parser.parse_args()
 if not os.path.isdir(args.dataset + "_" + args.train_dir):
     os.makedirs(args.dataset + "_" + args.train_dir)
@@ -112,7 +123,22 @@ f.close()
 
 f = open(os.path.join(args.dataset + "_" + args.train_dir, "log.txt"), "w")
 
-if args.add_time == 1:
+if args.add_history == 1:
+    dataset = data_partition_with_graph(args.dataset)
+    [user_train, user_valid, user_test, usernum, itemnum] = dataset
+
+    sampler = WarpSampler_with_graph(
+        user_train,
+        usernum,
+        itemnum,
+        batch_size=args.batch_size,
+        maxlen=args.maxlen,
+        maxlen2=args.user_len,  # number of past users
+        n_workers=3,
+    )
+
+
+elif args.add_time == 1:
     dataset = data_partition_with_time(args.dataset)
     [user_train, user_valid, user_test, usernum, itemnum, timenum] = dataset
     try:
@@ -240,6 +266,22 @@ elif args.model_name == "ssept":
         l2_reg=args.l2_emb,
         num_neg_test=args.num_neg_test,
     )
+
+elif args.model_name == "rnnrec":
+    print("Invoking RNNREC model ... ")
+    f.write("Invoking RNNREC model ... ")
+    model = RNNREC(
+        item_num=itemnum,
+        seq_max_len=args.maxlen,
+        num_blocks=args.num_blocks,
+        embedding_dim=args.hidden_units,
+        hidden_dim=args.hidden_units,
+        rnn_name=args.rnn_name,
+        dropout_rate=args.dropout_rate,
+        l2_reg=args.l2_emb,
+        num_neg_test=args.num_neg_test,
+    )
+
 elif args.model_name == "tisasrec":
     print("Invoking TiSASREC model ... ")
     f.write("Invoking TiSASREC model ... ")
@@ -268,6 +310,39 @@ elif args.model_name == "tisasrec":
         },
         tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
     ]
+
+elif args.model_name == "hsasrec":
+    # Hierarchical SASRec
+    print("Invoking hsasrec model ... ")
+    f.write("Invoking hsasrec model ... ")
+    model = HSASREC(
+        item_num=itemnum,
+        user_num=usernum,
+        seq_max_len=args.maxlen,
+        user_len=args.user_len,
+        num_blocks=args.num_blocks,
+        embedding_dim=args.hidden_units,
+        attention_dim=args.hidden_units,
+        attention_num_heads=args.num_heads,
+        dropout_rate=args.dropout_rate,
+        conv_dims=[100, 100],
+        l2_reg=args.l2_emb,
+        num_neg_test=args.num_neg_test,
+    )
+    train_step_signature = [
+        {
+            "users": tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
+            "input_seq": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+            "positive": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+            "negative": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+            "user_history": tf.TensorSpec(
+                shape=(None, args.maxlen, args.user_len), dtype=tf.float32
+            ),
+            # "position": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+        },
+        tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
+    ]
+
 
 else:
     raise ValueError(f"Unknown model name {args.model_name}")
@@ -372,11 +447,18 @@ for epoch in range(1, args.num_epochs + 1):
             # inputs["position"] = np.tile(
             #     np.expand_dims(np.arange(args.maxlen), 0), (len(u), 1)
             # )
+        elif args.add_history == 1:
+            u, seq, his, pos, neg = sampler.next_batch()
+            # u, seq, pos sequence of args.maxlen elements
+            # his: sequence of (args.maxlen, args.maxlen2) elements
+            inputs, target = create_combined_dataset(u, seq, pos, neg, args.maxlen)
+            inputs["user_history"] = np.array(his)  # (b, seqlen, seqlen2)
+
         else:
             u, seq, pos, neg = sampler.next_batch()
             inputs, target = create_combined_dataset(u, seq, pos, neg, args.maxlen)
 
-        # print(inputs)
+        # print(inputs["user_history"].shape)
         # out = model(inputs, training=False)
         # print(out)
         # print(out.shape)
@@ -405,13 +487,11 @@ for epoch in range(1, args.num_epochs + 1):
         f"Epoch: {epoch}, Train Loss: {np.mean(step_loss):.3f}, {train_loss.result():.3f}\n"
     )
 
-    if epoch % 5 == 0:
+    if epoch % 1 == 0:
         t1 = time.time() - t0
         T += t1
         print("Evaluating...")
         t_test = evaluate(model, dataset, args)
-        # print(t_test)
-        # sys.exit("HERE")
         t_valid = evaluate_valid(model, dataset, args)
         print(
             f"epoch: {epoch}, time: {T}, valid (NDCG@10: {t_valid[0]:.4f}, HR@10: {t_valid[1]:.4f})"
@@ -420,7 +500,7 @@ for epoch in range(1, args.num_epochs + 1):
             f"epoch: {epoch}, time: {T},  test (NDCG@10: {t_test[0]:.4f}, HR@10: {t_test[1]:.4f})"
         )
 
-        f.write(str(t_valid) + " " + str(t_test) + "\n")
+        f.write("validation: " + str(t_valid) + " test: " + str(t_test) + "\n")
         f.flush()
         t0 = time.time()
 

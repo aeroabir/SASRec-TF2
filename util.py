@@ -240,6 +240,10 @@ def evaluate(model, dataset, args):
         res = evaluate_with_time(model, dataset, args)
         return res
 
+    elif args.add_history:
+        res = evaluate_with_graph(model, dataset, args)
+        return res
+
     [train, valid, test, usernum, itemnum] = copy.deepcopy(dataset)
 
     NDCG = 0.0
@@ -358,6 +362,10 @@ def evaluate_valid(model, dataset, args):
 
     if args.add_time == 1:
         res = evaluate_valid_with_time(model, dataset, args)
+        return res
+
+    if args.add_history == 1:
+        res = evaluate_valid_with_graph(model, dataset, args)
         return res
 
     [train, valid, test, usernum, itemnum] = copy.deepcopy(dataset)
@@ -553,6 +561,166 @@ def evaluate_valid_with_time(model, dataset, args):
         inputs["time_matrix"] = np.array([time_matrix])
 
         # inverse to get descending sort
+        predictions = -1.0 * model.predict(inputs)
+        predictions = np.array(predictions)
+        predictions = predictions[0]
+
+        rank = predictions.argsort().argsort()[0]
+
+        valid_user += 1
+
+        if rank < 10:
+            NDCG += 1 / np.log2(rank + 2)
+            HT += 1
+
+    return NDCG / valid_user, HT / valid_user
+
+
+def data_partition_with_graph(fname):
+    """
+    Read data with past user history associated with each item
+    """
+    usernum = 0
+    itemnum = 0
+    User = defaultdict(list)
+    user_train = {}
+    user_valid = {}
+    user_test = {}
+    # assume user/item index starting from 1
+    f = open("data/%s.txt" % fname, "r")
+    for line in f:
+        u, i, hist = line.rstrip().split("\t")
+        u = int(u)
+        i = int(i)
+        if hist == "0":
+            hist = [0]
+        else:
+            hist = hist.split(",")
+            hist = [int(h) for h in hist]
+        usernum = max(u, usernum)
+        itemnum = max(i, itemnum)
+        User[u].append((i, hist))
+
+    for user in User:
+        nfeedback = len(User[user])
+        if nfeedback < 3:
+            user_train[user] = User[user]
+            user_valid[user] = []
+            user_test[user] = []
+        else:
+            user_train[user] = User[user][:-2]
+            user_valid[user] = []
+            user_valid[user].append(User[user][-2])
+            user_test[user] = []
+            user_test[user].append(User[user][-1])
+    return [user_train, user_valid, user_test, usernum, itemnum]
+
+
+def evaluate_with_graph(model, dataset, args):
+
+    [train, valid, test, usernum, itemnum] = copy.deepcopy(dataset)
+    NDCG = 0.0
+    HT = 0.0
+    valid_user = 0.0
+
+    if usernum > 10000:
+        users = random.sample(range(1, usernum + 1), 10000)
+    else:
+        users = range(1, usernum + 1)
+
+    for u in tqdm(users, ncols=70, leave=False, unit="b"):
+
+        if len(train[u]) < 1 or len(test[u]) < 1:
+            continue
+
+        seq = np.zeros([args.maxlen], dtype=np.int32)
+        his = np.zeros([args.maxlen, args.user_len], dtype=np.int32)
+        idx = args.maxlen - 1
+        seq[idx] = valid[u][0][0]
+        num_users = len(valid[u][0][1])
+        his[idx][args.user_len - num_users :] = valid[u][0][1]
+        idx -= 1
+        for i in reversed(train[u]):
+            seq[idx] = i[0]
+            num_users = len(i[1])
+            his[idx][args.user_len - num_users :] = i[1]
+            idx -= 1
+            if idx == -1:
+                break
+        rated = set([x[0] for x in train[u]])
+        rated.add(0)
+        item_idx = [test[u][0][0]]
+        for _ in range(args.num_neg_test):
+            t = np.random.randint(1, itemnum + 1)
+            while t in rated:
+                t = np.random.randint(1, itemnum + 1)
+            item_idx.append(t)
+
+        inputs = {}
+        inputs["user"] = np.expand_dims(np.array([u]), axis=-1)
+        inputs["input_seq"] = np.array([seq])
+        inputs["candidate"] = np.array([item_idx])
+        inputs["user_history"] = np.array([his])
+
+        # inverse to get descending sort
+        predictions = -1.0 * model.predict(inputs)
+        predictions = np.array(predictions)
+        predictions = predictions[0]
+
+        # double sorting trick to get the rank
+        rank = predictions.argsort().argsort()[0]
+
+        valid_user += 1
+
+        if rank < 10:
+            NDCG += 1 / np.log2(rank + 2)
+            HT += 1
+
+    return NDCG / valid_user, HT / valid_user
+
+
+def evaluate_valid_with_graph(model, dataset, args):
+
+    [train, valid, test, usernum, itemnum] = copy.deepcopy(dataset)
+
+    NDCG = 0.0
+    valid_user = 0.0
+    HT = 0.0
+    if usernum > 10000:
+        users = random.sample(range(1, usernum + 1), 10000)
+    else:
+        users = range(1, usernum + 1)
+
+    for u in tqdm(users, ncols=70, leave=False, unit="b"):
+        if len(train[u]) < 1 or len(valid[u]) < 1:
+            continue
+
+        seq = np.zeros([args.maxlen], dtype=np.int32)
+        his = np.zeros([args.maxlen, args.user_len], dtype=np.int32)
+        idx = args.maxlen - 1
+        for i in reversed(train[u]):
+            seq[idx] = i[0]
+            num_users = len(i[1])
+            his[idx][args.user_len - num_users :] = i[1]
+            idx -= 1
+            if idx == -1:
+                break
+
+        rated = set([x[0] for x in train[u]])
+        rated.add(0)
+        item_idx = [valid[u][0][0]]
+        for _ in range(args.num_neg_test):
+            t = np.random.randint(1, itemnum + 1)
+            while t in rated:
+                t = np.random.randint(1, itemnum + 1)
+            item_idx.append(t)
+
+        inputs = {}
+        inputs["user"] = np.expand_dims(np.array([u]), axis=-1)
+        inputs["input_seq"] = np.array([seq])
+        inputs["candidate"] = np.array([item_idx])
+        inputs["user_history"] = np.array([his])
+
         predictions = -1.0 * model.predict(inputs)
         predictions = np.array(predictions)
         predictions = predictions[0]
