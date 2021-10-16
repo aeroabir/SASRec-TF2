@@ -339,14 +339,19 @@ class HSASREC(tf.keras.Model):
         self.use_item_history = True  # for ablation study
         self.use_user_history = True  # for ablation study
 
-        # User embedding & encoding
-        self.user_embedding_layer = tf.keras.layers.Embedding(
-            self.user_num + 1,
-            self.user_embedding_dim,
-            name="user_embeddings",
-            mask_zero=False,
-            embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
-        )
+        if self.use_user_history:
+            # User embedding & encoding
+            self.user_embedding_layer = tf.keras.layers.Embedding(
+                self.user_num + 1,
+                self.user_embedding_dim,
+                name="user_embeddings",
+                mask_zero=False,
+                embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
+            )
+
+            self.user_attention_encoder = MultiHeadAttention_v2(
+                self.attention_dim, 4, self.user_embedding_layer
+            )
 
         if self.use_item_history:
 
@@ -467,11 +472,17 @@ class HSASREC(tf.keras.Model):
 
     def call(self, x, training):
 
-        # users = x["users"]
+        users = x["users"]
         input_seq = x["input_seq"]
         pos = x["positive"]
         neg = x["negative"]
         his = x["item_history"]
+        his_u = x["user_history"]
+
+        u_hist_attention = self.attention_encoder(input_seq, his)
+
+        print(users.shape, his_u.shape)
+        sys.exit("HERE")
 
         # user-embedding for the item history
         # u_latent = self.user_embedding_layer(users)

@@ -181,6 +181,7 @@ def sample_function_graph(
 
         seq = np.zeros([maxlen], dtype=np.int32)
         his = np.zeros([maxlen, maxlen2], dtype=np.int32)
+        his_u = np.zeros([maxlen, maxlen2], dtype=np.int32)
         pos = np.zeros([maxlen], dtype=np.int32)
         neg = np.zeros([maxlen], dtype=np.int32)
         nxt = user_train[user][-1]
@@ -190,8 +191,20 @@ def sample_function_graph(
         ts = set([x[0] for x in user_train[user]])  # positive items
         for i in reversed(user_train[user][:-1]):
             seq[idx] = i[0]
-            num_users = len(i[1])
-            his[idx][maxlen2 - num_users :] = i[1]
+
+            if all(isinstance(el, list) for el in i[1]):
+                # both user and item history, i[1][0] and i[1][1]
+                num_elements = min(len(i[1][0]), maxlen2)
+                his_u[idx][maxlen2 - num_elements :] = i[1][0][:num_elements]
+
+                num_elements = min(len(i[1][1]), maxlen2)
+                his[idx][maxlen2 - num_elements :] = i[1][1][:num_elements]
+
+            else:
+                # only item history, i[1]
+                num_elements = min(len(i[1]), maxlen2)
+                his[idx][maxlen2 - num_elements :] = i[1][:num_elements]
+
             pos[idx] = nxt[0]
             if nxt[0] != 0:
                 neg[idx] = random_neq(1, itemnum + 1, ts)
@@ -200,7 +213,7 @@ def sample_function_graph(
             if idx == -1:
                 break
 
-        return (user, seq, his, pos, neg)
+        return (user, seq, his, his_u, pos, neg)
 
     np.random.seed(SEED)
     while True:

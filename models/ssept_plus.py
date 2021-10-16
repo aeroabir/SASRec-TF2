@@ -249,9 +249,9 @@ class LayerNormalization(tf.keras.layers.Layer):
         return output
 
 
-class SSEPT(tf.keras.Model):
+class SSEPT_PLUS(tf.keras.Model):
     def __init__(self, **kwargs):
-        super(SSEPT, self).__init__()
+        super(SSEPT_PLUS, self).__init__()
 
         self.item_num = kwargs.get("item_num", None)
         self.user_num = kwargs.get("user_num", None)  # New
@@ -309,6 +309,8 @@ class SSEPT(tf.keras.Model):
             self.seq_max_len, self.hidden_units, 1e-08
         )
 
+        self.mlp_user = tf.keras.layers.Dense(units=1, activation="relu")
+
     def embedding(self, input_seq):
 
         seq_embeddings = self.item_embedding_layer(input_seq)
@@ -325,28 +327,40 @@ class SSEPT(tf.keras.Model):
 
     def call(self, x, training):
 
-        users = x["users"]
         input_seq = x["input_seq"]
         pos = x["positive"]
         neg = x["negative"]
+        users = x["users"]  # (None, 1)
+        prev_users = x["user_history"]  # (None, seq_max_len, user_len)
 
         mask = tf.expand_dims(tf.cast(tf.not_equal(input_seq, 0), tf.float32), -1)
         seq_embeddings, positional_embeddings = self.embedding(input_seq)
 
         # User Encoding
-        # u0_latent = self.user_embedding_layer(users[0])
-        # u0_latent = u0_latent * (self.embedding_dim ** 0.5)
         u_latent = self.user_embedding_layer(users)
         u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
-        # return users
 
         # replicate the user embedding for all the items
         u_latent = tf.tile(u_latent, [1, tf.shape(input_seq)[1], 1])  # (b, s, h)
 
+        # changes to (b, seq_max_len, user_len, 100)
+        # if we take only the last value then it will be same as SSEPT
+        # Here we convert it to (b, seq_max_len, 100) through transformations
+        # transformation to bring user-embedding to the required shape
+        u_latent_history = self.user_embedding_layer(prev_users)
+        u_latent_history = tf.transpose(u_latent_history, perm=[0, 1, 3, 2])
+        u_latent_history = self.mlp_user(u_latent_history)
+        u_latent_history = tf.squeeze(u_latent_history, axis=-1)
+        u_total = u_latent_history + u_latent
+        u_total = u_total * (self.user_embedding_dim ** 0.5)  # (b, s, h)
+
+        # u_total = u_latent
+
         seq_embeddings = tf.reshape(
-            tf.concat([seq_embeddings, u_latent], 2),
-            [tf.shape(input_seq)[0], -1, self.hidden_units],
+            tf.concat([seq_embeddings, u_total], 2),
+            [tf.shape(input_seq)[0], self.seq_max_len, self.hidden_units],
         )
+
         seq_embeddings += positional_embeddings
 
         # dropout
@@ -405,24 +419,36 @@ class SSEPT(tf.keras.Model):
 
     def predict(self, inputs):
         training = False
-        user = inputs["user"]
         input_seq = inputs["input_seq"]
         candidate = inputs["candidate"]
+        user = inputs["user"]
+        prev_users = inputs["user_history"]  # (1, seq_max_len, user_len)
+
+        u_latent_history = self.user_embedding_layer(prev_users)
+        u_latent_history = u_latent_history * (
+            self.user_embedding_dim ** 0.5
+        )  # (1, s1, s2, h)
+        # transformation to bring user-embedding to the required shape
+        u_latent_history = tf.transpose(u_latent_history, perm=[0, 1, 3, 2])
+        u_latent_history = self.mlp_user(u_latent_history)
+        u_latent_history = tf.squeeze(u_latent_history, axis=-1)
 
         mask = tf.expand_dims(tf.cast(tf.not_equal(input_seq, 0), tf.float32), -1)
         seq_embeddings, positional_embeddings = self.embedding(input_seq)  # (1, s, h)
 
         u0_latent = self.user_embedding_layer(user)
         u0_latent = u0_latent * (self.user_embedding_dim ** 0.5)  # (1, 1, h)
+
         u0_latent = tf.squeeze(u0_latent, axis=0)  # (1, h)
         test_user_emb = tf.tile(u0_latent, [1 + self.num_neg_test, 1])  # (101, h)
 
         u_latent = self.user_embedding_layer(user)
         u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
         u_latent = tf.tile(u_latent, [1, tf.shape(input_seq)[1], 1])  # (b, s, h)
+        u_latent_history += u_latent
 
         seq_embeddings = tf.reshape(
-            tf.concat([seq_embeddings, u_latent], 2),
+            tf.concat([seq_embeddings, u_latent_history], 2),
             [tf.shape(input_seq)[0], -1, self.hidden_units],
         )
         seq_embeddings += positional_embeddings  # (b, s, h1 + h2)

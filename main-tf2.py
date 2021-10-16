@@ -10,7 +10,8 @@ from tqdm import tqdm
 from sampler import WarpSampler, WarpSampler_with_time, WarpSampler_with_graph
 from models.sasrec import SASREC
 from models.sasrec_plus import SASREC_PLUS
-from models.hsasrec import HSASREC
+from models.ssept_plus import SSEPT_PLUS
+from models.hsasrec_users import HSASREC
 from models.tisasrec import TISASREC
 from models.ssept import SSEPT
 from models.rnn import RNNREC
@@ -104,7 +105,7 @@ parser.add_argument("--rnn_name", default="gru", type=str)
 
 # user-history based
 parser.add_argument("--add_history", default=0, type=int)
-parser.add_argument("--user_len", default=50, type=int)
+parser.add_argument("--user_len", default=10, type=int)
 
 
 args = parser.parse_args()
@@ -322,6 +323,7 @@ elif args.model_name == "hsasrec":
         user_len=args.user_len,
         num_blocks=args.num_blocks,
         embedding_dim=args.hidden_units,
+        user_embedding_dim=int(args.hidden_units / 1),
         attention_dim=args.hidden_units,
         attention_num_heads=args.num_heads,
         dropout_rate=args.dropout_rate,
@@ -329,6 +331,21 @@ elif args.model_name == "hsasrec":
         l2_reg=args.l2_emb,
         num_neg_test=args.num_neg_test,
     )
+    # model = SSEPT_PLUS(
+    #     item_num=itemnum,
+    #     user_num=usernum,
+    #     seq_max_len=args.maxlen,
+    #     user_len=args.user_len,
+    #     num_blocks=args.num_blocks,
+    #     user_embedding_dim=args.hidden_units,
+    #     item_embedding_dim=args.hidden_units,
+    #     attention_dim=args.hidden_units,
+    #     attention_num_heads=args.num_heads,
+    #     dropout_rate=args.dropout_rate,
+    #     l2_reg=args.l2_emb,
+    #     num_neg_test=args.num_neg_test,
+    # )
+
     train_step_signature = [
         {
             "users": tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
@@ -336,6 +353,9 @@ elif args.model_name == "hsasrec":
             "positive": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
             "negative": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
             "user_history": tf.TensorSpec(
+                shape=(None, args.maxlen, args.user_len), dtype=tf.float32
+            ),
+            "item_history": tf.TensorSpec(
                 shape=(None, args.maxlen, args.user_len), dtype=tf.float32
             ),
             # "position": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
@@ -448,11 +468,15 @@ for epoch in range(1, args.num_epochs + 1):
             #     np.expand_dims(np.arange(args.maxlen), 0), (len(u), 1)
             # )
         elif args.add_history == 1:
-            u, seq, his, pos, neg = sampler.next_batch()
+            u, seq, his_i, his_u, pos, neg = sampler.next_batch()
+            # print(np.array(his_i).shape)
+            # print(np.array(his_u).shape)
+            # sys.exit("KK")
             # u, seq, pos sequence of args.maxlen elements
             # his: sequence of (args.maxlen, args.maxlen2) elements
             inputs, target = create_combined_dataset(u, seq, pos, neg, args.maxlen)
-            inputs["user_history"] = np.array(his)  # (b, seqlen, seqlen2)
+            inputs["user_history"] = np.array(his_u)  # (b, seqlen, seqlen2)
+            inputs["item_history"] = np.array(his_i)  # (b, seqlen, seqlen2)
 
         else:
             u, seq, pos, neg = sampler.next_batch()
@@ -487,7 +511,7 @@ for epoch in range(1, args.num_epochs + 1):
         f"Epoch: {epoch}, Train Loss: {np.mean(step_loss):.3f}, {train_loss.result():.3f}\n"
     )
 
-    if epoch % 1 == 0:
+    if epoch % 5 == 0:
         t1 = time.time() - t0
         T += t1
         print("Evaluating...")

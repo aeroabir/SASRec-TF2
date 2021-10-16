@@ -240,7 +240,7 @@ def evaluate(model, dataset, args):
         res = evaluate_with_time(model, dataset, args)
         return res
 
-    elif args.add_history:
+    elif args.add_history == 1:
         res = evaluate_with_graph(model, dataset, args)
         return res
 
@@ -576,9 +576,19 @@ def evaluate_valid_with_time(model, dataset, args):
     return NDCG / valid_user, HT / valid_user
 
 
+def fill_zeros(lst):
+    lst2 = []
+    for elem in lst:
+        if elem == "0":
+            lst2.append([0])
+        else:
+            lst2.append([int(h) for h in elem.split(",")])
+    return lst2
+
+
 def data_partition_with_graph(fname):
     """
-    Read data with past user history associated with each item
+    Read data with past user & item history associated with each item
     """
     usernum = 0
     itemnum = 0
@@ -589,14 +599,21 @@ def data_partition_with_graph(fname):
     # assume user/item index starting from 1
     f = open("data/%s.txt" % fname, "r")
     for line in f:
-        u, i, hist = line.rstrip().split("\t")
+        elements = line.rstrip().split("\t")
+        u = elements[0]
+        i = elements[1]
         u = int(u)
         i = int(i)
-        if hist == "0":
-            hist = [0]
-        else:
-            hist = hist.split(",")
-            hist = [int(h) for h in hist]
+        # only item history
+        # hist = elements[3]
+        # if hist == "0":
+        #     hist = [0]
+        # else:
+        #     hist = [int(h) for h in hist.split(",")]
+
+        # both user and item history
+        hist = [elements[2], elements[3]]
+        hist = fill_zeros(hist)
         usernum = max(u, usernum)
         itemnum = max(i, itemnum)
         User[u].append((i, hist))
@@ -635,15 +652,35 @@ def evaluate_with_graph(model, dataset, args):
 
         seq = np.zeros([args.maxlen], dtype=np.int32)
         his = np.zeros([args.maxlen, args.user_len], dtype=np.int32)
+        his_u = np.zeros([args.maxlen, args.user_len], dtype=np.int32)
         idx = args.maxlen - 1
         seq[idx] = valid[u][0][0]
-        num_users = len(valid[u][0][1])
-        his[idx][args.user_len - num_users :] = valid[u][0][1]
+
+        if all(isinstance(el, list) for el in valid[u][0][1]):
+            hist_u, hist_i = valid[u][0][1]
+            num_users = min(len(hist_i), args.user_len)
+            his[idx][args.user_len - num_users :] = hist_i[:num_users]
+
+            num_users = min(len(hist_u), args.user_len)
+            his_u[idx][args.user_len - num_users :] = hist_u[:num_users]
+        else:
+            num_users = min(len(valid[u][0][1]), args.user_len)
+            his[idx][args.user_len - num_users :] = valid[u][0][1][:num_users]
+
         idx -= 1
         for i in reversed(train[u]):
             seq[idx] = i[0]
-            num_users = len(i[1])
-            his[idx][args.user_len - num_users :] = i[1]
+            if all(isinstance(el, list) for el in i[1]):
+                hist_u, hist_i = i[1]
+                num_users = min(len(hist_i), args.user_len)
+                his[idx][args.user_len - num_users :] = hist_i[:num_users]
+
+                num_users = min(len(hist_u), args.user_len)
+                his_u[idx][args.user_len - num_users :] = hist_u[:num_users]
+            else:
+                num_users = min(len(i[1]), args.user_len)
+                his[idx][args.user_len - num_users :] = i[1][:num_users]
+
             idx -= 1
             if idx == -1:
                 break
@@ -660,7 +697,8 @@ def evaluate_with_graph(model, dataset, args):
         inputs["user"] = np.expand_dims(np.array([u]), axis=-1)
         inputs["input_seq"] = np.array([seq])
         inputs["candidate"] = np.array([item_idx])
-        inputs["user_history"] = np.array([his])
+        inputs["user_history"] = np.array([his_u])
+        inputs["item_history"] = np.array([his])
 
         # inverse to get descending sort
         predictions = -1.0 * model.predict(inputs)
@@ -697,11 +735,21 @@ def evaluate_valid_with_graph(model, dataset, args):
 
         seq = np.zeros([args.maxlen], dtype=np.int32)
         his = np.zeros([args.maxlen, args.user_len], dtype=np.int32)
+        his_u = np.zeros([args.maxlen, args.user_len], dtype=np.int32)
         idx = args.maxlen - 1
         for i in reversed(train[u]):
             seq[idx] = i[0]
-            num_users = len(i[1])
-            his[idx][args.user_len - num_users :] = i[1]
+            if all(isinstance(el, list) for el in i[1]):
+                hist_u, hist_i = i[1]
+                num_elems = min(len(hist_i), args.user_len)
+                his[idx][args.user_len - num_elems :] = hist_i[:num_elems]
+
+                num_users = min(len(hist_u), args.user_len)
+                his_u[idx][args.user_len - num_users :] = hist_u[:num_users]
+
+            else:
+                num_users = min(len(i[1]), args.user_len)
+                his[idx][args.user_len - num_users :] = i[1][:num_users]
             idx -= 1
             if idx == -1:
                 break
@@ -719,7 +767,8 @@ def evaluate_valid_with_graph(model, dataset, args):
         inputs["user"] = np.expand_dims(np.array([u]), axis=-1)
         inputs["input_seq"] = np.array([seq])
         inputs["candidate"] = np.array([item_idx])
-        inputs["user_history"] = np.array([his])
+        inputs["user_history"] = np.array([his_u])
+        inputs["item_history"] = np.array([his])
 
         predictions = -1.0 * model.predict(inputs)
         predictions = np.array(predictions)

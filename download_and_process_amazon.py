@@ -443,7 +443,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         category = sys.argv[1]
     else:
-        category = "Beauty"  # 'Toys_and_Games' # 'Movies_and_TV', 'Beauty', 'Electronics' (too big)
+        category = "Books"  # 'Toys_and_Games' # 'Movies_and_TV', 'Beauty', 'Electronics' (too big)
 
     if len(sys.argv) > 2:
         K = int(sys.argv[2])
