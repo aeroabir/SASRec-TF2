@@ -44,8 +44,11 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         # Scale
         outputs = outputs / (K_.get_shape().as_list()[-1] ** 0.5)
 
+        # print(outputs.shape)
+
         # Key Masking
         key_masks = tf.sign(tf.abs(tf.reduce_sum(keys, axis=-1)))  # (N, T_k)
+
         key_masks = tf.tile(key_masks, [self.num_heads, 1])  # (h*N, T_k)
         key_masks = tf.tile(
             tf.expand_dims(key_masks, 1), [1, tf.shape(queries)[1], 1]
@@ -302,7 +305,7 @@ class SASREC(tf.keras.Model):
             self.embedding_dim,
             name="item_embeddings",
             mask_zero=True,
-            embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
+            embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg),
         )
 
         self.positional_embedding_layer = tf.keras.layers.Embedding(
@@ -310,7 +313,7 @@ class SASREC(tf.keras.Model):
             self.embedding_dim,
             name="positional_embeddings",
             mask_zero=False,
-            embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
+            embeddings_regularizer=tf.keras.regularizers.l2(self.l2_reg),
         )
         self.dropout_layer = tf.keras.layers.Dropout(self.dropout_rate)
         self.encoder = Encoder(

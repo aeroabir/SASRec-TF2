@@ -260,14 +260,34 @@ class SSEPT(tf.keras.Model):
         self.embedding_dim = kwargs.get("embedding_dim", 100)
         self.attention_dim = kwargs.get("attention_dim", 100)
         self.attention_num_heads = kwargs.get("attention_num_heads", 1)
-        self.conv_dims = kwargs.get("conv_dims", [200, 200])
+        # self.conv_dims = kwargs.get("conv_dims", [100, 100])  # change-1, [200, 200]
         self.dropout_rate = kwargs.get("dropout_rate", 0.5)
         self.l2_reg = kwargs.get("l2_reg", 0.0)
         self.num_neg_test = kwargs.get("num_neg_test", 100)
+        self.add_user_embeddings = kwargs.get("add_user_embeddings", True)
+        self.add_type = kwargs.get("add_type", "concat")  # "concat" or "add"
 
         self.user_embedding_dim = kwargs.get("user_embedding_dim", self.embedding_dim)
         self.item_embedding_dim = kwargs.get("item_embedding_dim", self.embedding_dim)
-        self.hidden_units = self.item_embedding_dim + self.user_embedding_dim
+
+        if self.user_embedding_dim != self.item_embedding_dim:
+            self.add_type = "concat"
+
+        if self.add_user_embeddings:
+            self.hidden_units = self.item_embedding_dim + self.user_embedding_dim        
+
+            # New, user embedding
+            self.user_embedding_layer = tf.keras.layers.Embedding(
+                input_dim=self.user_num + 1,
+                output_dim=self.user_embedding_dim,
+                name="user_embeddings",
+                mask_zero=True,
+                input_length=1,
+                embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
+            )
+
+        else:
+            self.hidden_units = self.item_embedding_dim  # change-2
 
         self.item_embedding_layer = tf.keras.layers.Embedding(
             self.item_num + 1,
@@ -277,31 +297,23 @@ class SSEPT(tf.keras.Model):
             embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
         )
 
-        # New, user embedding
-        self.user_embedding_layer = tf.keras.layers.Embedding(
-            input_dim=self.user_num + 1,
-            output_dim=self.user_embedding_dim,
-            name="user_embeddings",
-            mask_zero=True,
-            input_length=1,
-            embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
-        )
-
         self.positional_embedding_layer = tf.keras.layers.Embedding(
             self.seq_max_len,
-            self.user_embedding_dim + self.item_embedding_dim,
+            # self.user_embedding_dim + self.item_embedding_dim,
+            self.hidden_units,  # change-3
             name="positional_embeddings",
             mask_zero=False,
             embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
         )
         self.dropout_layer = tf.keras.layers.Dropout(self.dropout_rate)
+        conv_dims = [self.hidden_units, self.hidden_units]
         self.encoder = Encoder(
             self.num_blocks,
             self.seq_max_len,
             self.hidden_units,
             self.hidden_units,
             self.attention_num_heads,
-            self.conv_dims,
+            conv_dims,
             self.dropout_rate,
         )
         self.mask_layer = tf.keras.layers.Masking(mask_value=0)
@@ -333,20 +345,25 @@ class SSEPT(tf.keras.Model):
         mask = tf.expand_dims(tf.cast(tf.not_equal(input_seq, 0), tf.float32), -1)
         seq_embeddings, positional_embeddings = self.embedding(input_seq)
 
-        # User Encoding
-        # u0_latent = self.user_embedding_layer(users[0])
-        # u0_latent = u0_latent * (self.embedding_dim ** 0.5)
-        u_latent = self.user_embedding_layer(users)
-        u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
-        # return users
+        if self.add_user_embeddings:
+            # User Encoding
+            # u0_latent = self.user_embedding_layer(users[0])
+            # u0_latent = u0_latent * (self.embedding_dim ** 0.5)
+            u_latent = self.user_embedding_layer(users)
+            u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
 
-        # replicate the user embedding for all the items
-        u_latent = tf.tile(u_latent, [1, tf.shape(input_seq)[1], 1])  # (b, s, h)
+            # replicate the user embedding for all the items
+            u_latent = tf.tile(u_latent, [1, tf.shape(input_seq)[1], 1])  # (b, s, h)
 
-        seq_embeddings = tf.reshape(
-            tf.concat([seq_embeddings, u_latent], 2),
-            [tf.shape(input_seq)[0], -1, self.hidden_units],
-        )
+            if self.add_type == "add":
+                seq_embeddings += u_latent  # change-4
+
+            elif self.add_type == "concat":
+                seq_embeddings = tf.reshape(
+                    tf.concat([seq_embeddings, u_latent], 2),
+                    [tf.shape(input_seq)[0], -1, self.hidden_units],
+                )
+
         seq_embeddings += positional_embeddings
 
         # dropout
@@ -366,18 +383,24 @@ class SSEPT(tf.keras.Model):
         pos = self.mask_layer(pos)
         neg = self.mask_layer(neg)
 
-        user_emb = tf.reshape(
-            u_latent,
-            [tf.shape(input_seq)[0] * self.seq_max_len, self.user_embedding_dim],
-        )
         pos = tf.reshape(pos, [tf.shape(input_seq)[0] * self.seq_max_len])
         neg = tf.reshape(neg, [tf.shape(input_seq)[0] * self.seq_max_len])
         pos_emb = self.item_embedding_layer(pos)
         neg_emb = self.item_embedding_layer(neg)
 
-        # Add user embeddings
-        pos_emb = tf.reshape(tf.concat([pos_emb, user_emb], 1), [-1, self.hidden_units])
-        neg_emb = tf.reshape(tf.concat([neg_emb, user_emb], 1), [-1, self.hidden_units])
+        if self.add_user_embeddings:
+            user_emb = tf.reshape(
+                u_latent,
+                [tf.shape(input_seq)[0] * self.seq_max_len, self.user_embedding_dim],
+            )
+
+            # Add user embeddings
+            if self.add_type == "add":
+                pos_emb += user_emb  # change-5
+                neg_emb += user_emb  # change-6
+            elif self.add_type == "concat":
+                pos_emb = tf.reshape(tf.concat([pos_emb, user_emb], 1), [-1, self.hidden_units])
+                neg_emb = tf.reshape(tf.concat([neg_emb, user_emb], 1), [-1, self.hidden_units])
 
         seq_emb = tf.reshape(
             seq_attention,
@@ -412,19 +435,24 @@ class SSEPT(tf.keras.Model):
         mask = tf.expand_dims(tf.cast(tf.not_equal(input_seq, 0), tf.float32), -1)
         seq_embeddings, positional_embeddings = self.embedding(input_seq)  # (1, s, h)
 
-        u0_latent = self.user_embedding_layer(user)
-        u0_latent = u0_latent * (self.user_embedding_dim ** 0.5)  # (1, 1, h)
-        u0_latent = tf.squeeze(u0_latent, axis=0)  # (1, h)
-        test_user_emb = tf.tile(u0_latent, [1 + self.num_neg_test, 1])  # (101, h)
+        if self.add_user_embeddings:
+            u0_latent = self.user_embedding_layer(user)
+            u0_latent = u0_latent * (self.user_embedding_dim ** 0.5)  # (1, 1, h)
+            u0_latent = tf.squeeze(u0_latent, axis=0)  # (1, h)
+            test_user_emb = tf.tile(u0_latent, [1 + self.num_neg_test, 1])  # (101, h)
 
-        u_latent = self.user_embedding_layer(user)
-        u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
-        u_latent = tf.tile(u_latent, [1, tf.shape(input_seq)[1], 1])  # (b, s, h)
+            u_latent = self.user_embedding_layer(user)
+            u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
+            u_latent = tf.tile(u_latent, [1, tf.shape(input_seq)[1], 1])  # (b, s, h)
 
-        seq_embeddings = tf.reshape(
-            tf.concat([seq_embeddings, u_latent], 2),
-            [tf.shape(input_seq)[0], -1, self.hidden_units],
-        )
+            if self.add_type == "add":
+                seq_embeddings += u_latent
+
+            elif self.add_type == "concat":
+                seq_embeddings = tf.reshape(
+                    tf.concat([seq_embeddings, u_latent], 2),
+                    [tf.shape(input_seq)[0], -1, self.hidden_units],
+                )
         seq_embeddings += positional_embeddings  # (b, s, h1 + h2)
 
         seq_embeddings *= mask
@@ -438,9 +466,14 @@ class SSEPT(tf.keras.Model):
 
         candidate_emb = self.item_embedding_layer(candidate)  # (b, s2, h2)
         candidate_emb = tf.squeeze(candidate_emb, axis=0)  # (s2, h2)
-        candidate_emb = tf.reshape(
-            tf.concat([candidate_emb, test_user_emb], 1), [-1, self.hidden_units]
-        )  # (b*s2, h1+h2)
+        if self.add_user_embeddings:
+            if self.add_type == "add":
+                candidate_emb += test_user_emb
+
+            elif self.add_type == "concat":
+                candidate_emb = tf.reshape(
+                    tf.concat([candidate_emb, test_user_emb], 1), [-1, self.hidden_units]
+                )  # (b*s2, h1+h2)
 
         candidate_emb = tf.transpose(candidate_emb, perm=[1, 0])  # (h1+h2, b*s2)
         test_logits = tf.matmul(seq_emb, candidate_emb)  # (b*s1, b*s2)

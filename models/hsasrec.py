@@ -13,10 +13,11 @@ class MultiHeadAttention_v2(tf.keras.layers.Layer):
     key/values are batch_size X sequence_length-1 X sequence_length-2
     """
 
-    def __init__(self, attention_dim, num_heads, embeddings):
+    def __init__(self, attention_dim, num_heads, history_len, embeddings, final_dim):
         super(MultiHeadAttention_v2, self).__init__()
         self.num_heads = num_heads
         self.attention_dim = attention_dim
+        self.history_len = history_len
         assert attention_dim % self.num_heads == 0
         self.depth = attention_dim // self.num_heads
         self.embeddings = embeddings
@@ -24,17 +25,21 @@ class MultiHeadAttention_v2(tf.keras.layers.Layer):
         self.Q = tf.keras.layers.Dense(self.attention_dim, activation=None)
         self.K = tf.keras.layers.Dense(self.attention_dim, activation=None)
         self.V = tf.keras.layers.Dense(self.attention_dim, activation=None)
+        self.final = tf.keras.layers.Dense(final_dim, activation=None)
 
     def call(self, queries, keys):
         # queries (current items), (None, s1)
         # keys, values (item history), (None, s1, s2)
         queries = self.embeddings(queries)  # (None, s1, d)
         keys = self.embeddings(keys)  # (None, s1, s2, d)
+        # print(queries.shape, keys.shape)
 
         # Linear projections
         Q = self.Q(queries)  # (b, s1, d)
         K = self.K(keys)  # (b, s1, s2, d)
         V = self.V(keys)  # (b, s1, s2, d)
+        # print(Q.shape, K.shape, V.shape)
+        # print(self.num_heads, self.history_len)
 
         # Split and concat
         Q_ = tf.concat(tf.split(Q, self.num_heads, axis=2), axis=0)  # (b*N, s1, d/h)
@@ -44,28 +49,43 @@ class MultiHeadAttention_v2(tf.keras.layers.Layer):
         V_ = tf.concat(
             tf.split(V, self.num_heads, axis=3), axis=0
         )  # (b*N, s1, s2, d/h)
+        # print(Q_.shape, K_.shape, V_.shape)
 
         # print(Q_.shape, K_.shape, V_.shape)
-        Q_ = tf.expand_dims(Q_, axis=-2)  # (None, 50, 1, 25)
+        Q_ = tf.expand_dims(Q_, axis=-2)  # (None, s1, 1, h)
+        # Q_ = tf.tile(Q_, [1, 1, self.history_len, 1])
         outputs = tf.linalg.matmul(Q_, tf.transpose(K_, [0, 1, 3, 2]))
+        # print(outputs.shape)
         outputs = outputs / (K_.get_shape().as_list()[-1] ** 0.5)
-        # (None, 50, 1, 10)
+        # (None, s1, s2, s2)
+        # print(outputs.shape)
 
-        # key_masks = tf.sign(tf.abs(tf.reduce_sum(keys, axis=-1)))  # (None, 50, 10)
-        # key_masks = tf.tile(key_masks, [self.num_heads, 1, 1])
+        key_masks = tf.sign(tf.abs(tf.reduce_sum(keys, axis=-1)))  # (None, s1, s2)
+        # print(key_masks.shape)
+        key_masks = tf.tile(key_masks, [self.num_heads, 1, 1])  # (None, s1, s2)
+        # print(key_masks.shape)
+        key_masks = tf.tile(
+            tf.expand_dims(key_masks, 2),
+            [1, 1, 1, 1]
+            # tf.expand_dims(key_masks, 2), [1, 1, self.history_len, 1]
+        )  # (h*N, T_q, T_k)
         # print(key_masks.shape)
 
-        # paddings = tf.ones_like(outputs) * (-(2 ** 32) + 1)
-        # outputs = tf.where(tf.equal(key_masks, 0), paddings, outputs)
+        paddings = tf.ones_like(outputs) * (-(2 ** 32) + 1)
+        outputs = tf.where(tf.equal(key_masks, 0), paddings, outputs)
 
-        outputs = tf.nn.softmax(outputs, axis=-1)  # (None, s1, 1, s2)
-        outputs = tf.matmul(outputs, V_)  # (None, s1, 1, 25)
+        outputs = tf.nn.softmax(outputs, axis=-1)  # (None, s1, s2, s2)
+        outputs = tf.matmul(outputs, V_)  # (None, s1, s2, h)
         outputs = tf.concat(tf.split(outputs, self.num_heads, axis=0), axis=3)
         # (None, 50, 1, 100)
+        # print(outputs.shape, queries.shape)
         outputs = tf.squeeze(outputs, axis=-2)  # (None, 50, 100)
 
         # Residual connection
         outputs += queries
+
+        # to match with the other dimensions
+        outputs = self.final(outputs)
 
         return outputs
 
@@ -318,7 +338,7 @@ class HSASREC(tf.keras.Model):
         self.embedding_dim = kwargs.get("embedding_dim", 100)
         self.attention_dim = kwargs.get("attention_dim", 100)
         self.attention_num_heads = kwargs.get("attention_num_heads", 1)
-        self.conv_dims = kwargs.get("conv_dims", [200, 200])
+        # self.conv_dims = kwargs.get("conv_dims", [200, 200])
         self.dropout_rate = kwargs.get("dropout_rate", 0.5)
         self.l2_reg = kwargs.get("l2_reg", 0.0)
         self.num_neg_test = kwargs.get("num_neg_test", 100)
@@ -332,10 +352,13 @@ class HSASREC(tf.keras.Model):
         )
 
         # if user embedding is also used
+        self.hidden_units = self.embedding_dim + self.user_embedding_dim
         # self.hidden_units = self.embedding_dim + self.history_embedding_dim
 
+        self.conv_dims = [self.hidden_units, self.hidden_units]
+
         # if no user embedding is used
-        self.hidden_units = self.embedding_dim
+        # self.hidden_units = self.embedding_dim
         self.use_item_history = True  # for ablation study
         self.use_user_history = True  # for ablation study
 
@@ -389,8 +412,8 @@ class HSASREC(tf.keras.Model):
         # item position embedding
         self.positional_embedding_layer = tf.keras.layers.Embedding(
             self.seq_max_len,
-            self.embedding_dim,
-            # self.hidden_units,
+            # self.embedding_dim,
+            self.hidden_units,
             name="item_user_positional_embeddings",
             mask_zero=False,
             embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
@@ -410,7 +433,11 @@ class HSASREC(tf.keras.Model):
             self.seq_max_len, self.hidden_units, 1e-08
         )
         self.attention_encoder = MultiHeadAttention_v2(
-            self.attention_dim, 4, self.item_embedding_layer
+            self.attention_dim,
+            self.attention_num_heads,
+            self.user_len,
+            self.item_embedding_layer,
+            self.hidden_units,
         )
 
     def history_embedding(self, input_seq, training):
@@ -467,27 +494,27 @@ class HSASREC(tf.keras.Model):
 
     def call(self, x, training):
 
-        # users = x["users"]
+        users = x["users"]
         input_seq = x["input_seq"]
         pos = x["positive"]
         neg = x["negative"]
         his = x["item_history"]
 
         # user-embedding for the item history
-        # u_latent = self.user_embedding_layer(users)
-        # u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
+        u_latent = self.user_embedding_layer(users)
+        u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
         # replicate the user embedding for all the items
-        # u_latent = tf.tile(u_latent, [1, self.seq_max_len, 1])  # (b, s, h)
+        u_latent = tf.tile(u_latent, [1, self.seq_max_len, 1])  # (b, s, h)
 
         # item embeddings
         mask = tf.expand_dims(tf.cast(tf.not_equal(input_seq, 0), tf.float32), -1)
         seq_embeddings, positional_embeddings = self.embedding(input_seq)
-        # seq_embeddings = tf.reshape(
-        #     tf.concat([seq_embeddings, u_latent], 2),
-        #     [-1, self.seq_max_len, self.hidden_units],
-        # )
 
-        # print(seq_embeddings.shape, positional_embeddings.shape)
+        seq_embeddings = tf.reshape(
+            tf.concat([seq_embeddings, u_latent], 2),
+            [-1, self.seq_max_len, self.hidden_units],
+        )
+
         # add positional embeddings
         seq_embeddings += positional_embeddings
 
@@ -514,21 +541,20 @@ class HSASREC(tf.keras.Model):
         pos = self.mask_layer(pos)
         neg = self.mask_layer(neg)
 
-        # user_emb = tf.reshape(
-        #     u_latent,
-        #     [tf.shape(input_seq)[0] * self.seq_max_len, self.user_embedding_dim],
-        # )
+        user_emb = tf.reshape(
+            u_latent,
+            [tf.shape(input_seq)[0] * self.seq_max_len, self.user_embedding_dim],
+        )
         pos = tf.reshape(pos, [tf.shape(input_seq)[0] * self.seq_max_len])
         neg = tf.reshape(neg, [tf.shape(input_seq)[0] * self.seq_max_len])
         pos_emb = self.item_embedding_layer(pos)
         neg_emb = self.item_embedding_layer(neg)
 
         # Add user embeddings
-        # pos_emb = tf.reshape(tf.concat([pos_emb, user_emb], 1), [-1, self.hidden_units])
-        # neg_emb = tf.reshape(tf.concat([neg_emb, user_emb], 1), [-1, self.hidden_units])
+        pos_emb = tf.reshape(tf.concat([pos_emb, user_emb], 1), [-1, self.hidden_units])
+        neg_emb = tf.reshape(tf.concat([neg_emb, user_emb], 1), [-1, self.hidden_units])
 
         # print(pos_emb.shape, neg_emb.shape, seq_attention.shape)
-
         seq_emb = tf.reshape(
             seq_attention,
             [tf.shape(input_seq)[0] * self.seq_max_len, self.hidden_units],
@@ -550,26 +576,26 @@ class HSASREC(tf.keras.Model):
 
     def predict(self, x):
         training = False
-        # user = x["user"]
+        user = x["user"]
         input_seq = x["input_seq"]
         candidate = x["candidate"]
         his = x["item_history"]
 
-        # u0_latent = self.user_embedding_layer(user)
-        # u0_latent = u0_latent * (self.user_embedding_dim ** 0.5)  # (1, 1, h)
-        # u0_latent = tf.squeeze(u0_latent, axis=0)  # (1, h)
-        # test_user_emb = tf.tile(u0_latent, [1 + self.num_neg_test, 1])  # (101, h)
+        u0_latent = self.user_embedding_layer(user)
+        u0_latent = u0_latent * (self.user_embedding_dim ** 0.5)  # (1, 1, h)
+        u0_latent = tf.squeeze(u0_latent, axis=0)  # (1, h)
+        test_user_emb = tf.tile(u0_latent, [1 + self.num_neg_test, 1])  # (101, h)
 
-        # u_latent = self.user_embedding_layer(user)
-        # u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
-        # u_latent = tf.tile(u_latent, [1, tf.shape(input_seq)[1], 1])  # (b, s, h)
+        u_latent = self.user_embedding_layer(user)
+        u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
+        u_latent = tf.tile(u_latent, [1, tf.shape(input_seq)[1], 1])  # (b, s, h)
 
         mask = tf.expand_dims(tf.cast(tf.not_equal(input_seq, 0), tf.float32), -1)
         seq_embeddings, positional_embeddings = self.embedding(input_seq)
-        # seq_embeddings = tf.reshape(
-        #     tf.concat([seq_embeddings, u_latent], 2),
-        #     [tf.shape(input_seq)[0], -1, self.hidden_units],
-        # )
+        seq_embeddings = tf.reshape(
+            tf.concat([seq_embeddings, u_latent], 2),
+            [tf.shape(input_seq)[0], -1, self.hidden_units],
+        )
         seq_embeddings += positional_embeddings  # (b, s, h1 + h2)
 
         if self.use_item_history:
@@ -590,9 +616,9 @@ class HSASREC(tf.keras.Model):
 
         candidate_emb = self.item_embedding_layer(candidate)  # (b, s, d)
         candidate_emb = tf.squeeze(candidate_emb, axis=0)  # (s2, h2)
-        # candidate_emb = tf.reshape(
-        #     tf.concat([candidate_emb, test_user_emb], 1), [-1, self.hidden_units]
-        # )  # (b*s2, h1+h2)
+        candidate_emb = tf.reshape(
+            tf.concat([candidate_emb, test_user_emb], 1), [-1, self.hidden_units]
+        )  # (b*s2, h1+h2)
         candidate_emb = tf.transpose(candidate_emb, perm=[1, 0])  # (h1+h2, b*s2)
         # candidate_emb = tf.transpose(candidate_emb, perm=[0, 2, 1])  # (b, d, s)
         # print(seq_emb.shape, candidate_emb.shape)

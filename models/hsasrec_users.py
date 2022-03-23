@@ -331,13 +331,18 @@ class HSASREC(tf.keras.Model):
             "history_attention_dim", self.attention_dim
         )
 
-        # if user embedding is also used
-        # self.hidden_units = self.embedding_dim + self.history_embedding_dim
-
-        # if no user embedding is used
-        self.hidden_units = self.embedding_dim
         self.use_item_history = True  # for ablation study
         self.use_user_history = True  # for ablation study
+        self.use_user_embedding = True
+
+        # if user embedding is also used
+        if self.use_user_embedding:
+            self.hidden_units = self.embedding_dim + self.user_embedding_dim
+        else:
+            # if no user embedding is used
+            self.hidden_units = self.embedding_dim
+
+        self.conv_dims = [self.hidden_units, self.hidden_units]
 
         if self.use_user_history:
             # User embedding & encoding
@@ -350,7 +355,13 @@ class HSASREC(tf.keras.Model):
             )
 
             self.user_attention_encoder = MultiHeadAttention_v2(
-                self.attention_dim, 4, self.user_embedding_layer
+                attention_dim=self.hidden_units,
+                num_heads=4,
+                embeddings=self.user_embedding_layer,
+            )
+
+            self.mlp_user = tf.keras.layers.Dense(
+                units=self.hidden_units, activation="relu"
             )
 
         if self.use_item_history:
@@ -381,6 +392,9 @@ class HSASREC(tf.keras.Model):
             self.mlp_history = tf.keras.layers.Dense(
                 units=self.hidden_units, activation="relu"
             )
+            self.mlp_item = tf.keras.layers.Dense(
+                units=self.hidden_units, activation="relu"
+            )
 
         # item embedding
         self.item_embedding_layer = tf.keras.layers.Embedding(
@@ -394,8 +408,8 @@ class HSASREC(tf.keras.Model):
         # item position embedding
         self.positional_embedding_layer = tf.keras.layers.Embedding(
             self.seq_max_len,
-            self.embedding_dim,
-            # self.hidden_units,
+            # self.embedding_dim,
+            self.hidden_units,
             name="item_user_positional_embeddings",
             mask_zero=False,
             embeddings_regularizer=tf.keras.regularizers.L2(self.l2_reg),
@@ -415,7 +429,9 @@ class HSASREC(tf.keras.Model):
             self.seq_max_len, self.hidden_units, 1e-08
         )
         self.attention_encoder = MultiHeadAttention_v2(
-            self.attention_dim, 4, self.item_embedding_layer
+            attention_dim=self.embedding_dim,
+            num_heads=4,
+            embeddings=self.item_embedding_layer,
         )
 
     def history_embedding(self, input_seq, training):
@@ -479,24 +495,17 @@ class HSASREC(tf.keras.Model):
         his = x["item_history"]
         his_u = x["user_history"]
 
-        u_hist_attention = self.attention_encoder(input_seq, his)
-
-        print(users.shape, his_u.shape)
-        sys.exit("HERE")
-
         # user-embedding for the item history
-        # u_latent = self.user_embedding_layer(users)
-        # u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
+        u_latent = self.user_embedding_layer(users)
+        u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
         # replicate the user embedding for all the items
-        # u_latent = tf.tile(u_latent, [1, self.seq_max_len, 1])  # (b, s, h)
+        u_latent = tf.tile(u_latent, [1, self.seq_max_len, 1])  # (b, s, h)
 
         # item embeddings
         mask = tf.expand_dims(tf.cast(tf.not_equal(input_seq, 0), tf.float32), -1)
         seq_embeddings, positional_embeddings = self.embedding(input_seq)
-        # seq_embeddings = tf.reshape(
-        #     tf.concat([seq_embeddings, u_latent], 2),
-        #     [-1, self.seq_max_len, self.hidden_units],
-        # )
+
+        seq_embeddings = tf.concat([seq_embeddings, u_latent], 2)
 
         # print(seq_embeddings.shape, positional_embeddings.shape)
         # add positional embeddings
@@ -505,9 +514,19 @@ class HSASREC(tf.keras.Model):
         # add user/history embeddings - dimension should be
         # (None, seq_len, embedding_dim)
         if self.use_item_history:
-            hist_attention = self.attention_encoder(input_seq, his)
+            i_hist_attention = self.attention_encoder(input_seq, his)
             # hist_attention = self.history_embedding(his, training)
-            seq_embeddings += hist_attention
+            if self.use_user_embedding:
+                i_hist_attention = self.mlp_item(i_hist_attention)
+            seq_embeddings += i_hist_attention
+
+        # attention between the current user and the past users
+        # who interacted with the current list of items
+        if self.use_user_history:
+            users = tf.tile(users, [1, self.seq_max_len])
+            u_hist_attention = self.attention_encoder(users, his_u)
+            u_hist_attention = self.mlp_user(u_hist_attention)
+            seq_embeddings += u_hist_attention
 
         # dropout
         seq_embeddings = self.dropout_layer(seq_embeddings, training=training)
@@ -525,20 +544,18 @@ class HSASREC(tf.keras.Model):
         pos = self.mask_layer(pos)
         neg = self.mask_layer(neg)
 
-        # user_emb = tf.reshape(
-        #     u_latent,
-        #     [tf.shape(input_seq)[0] * self.seq_max_len, self.user_embedding_dim],
-        # )
+        user_emb = tf.reshape(
+            u_latent,
+            [tf.shape(input_seq)[0] * self.seq_max_len, self.user_embedding_dim],
+        )
         pos = tf.reshape(pos, [tf.shape(input_seq)[0] * self.seq_max_len])
         neg = tf.reshape(neg, [tf.shape(input_seq)[0] * self.seq_max_len])
         pos_emb = self.item_embedding_layer(pos)
         neg_emb = self.item_embedding_layer(neg)
 
         # Add user embeddings
-        # pos_emb = tf.reshape(tf.concat([pos_emb, user_emb], 1), [-1, self.hidden_units])
-        # neg_emb = tf.reshape(tf.concat([neg_emb, user_emb], 1), [-1, self.hidden_units])
-
-        # print(pos_emb.shape, neg_emb.shape, seq_attention.shape)
+        pos_emb = tf.reshape(tf.concat([pos_emb, user_emb], 1), [-1, self.hidden_units])
+        neg_emb = tf.reshape(tf.concat([neg_emb, user_emb], 1), [-1, self.hidden_units])
 
         seq_emb = tf.reshape(
             seq_attention,
@@ -561,33 +578,42 @@ class HSASREC(tf.keras.Model):
 
     def predict(self, x):
         training = False
-        # user = x["user"]
+        user = x["user"]
         input_seq = x["input_seq"]
         candidate = x["candidate"]
-        his = x["item_history"]
+        his_i = x["item_history"]
+        his_u = x["user_history"]
 
-        # u0_latent = self.user_embedding_layer(user)
-        # u0_latent = u0_latent * (self.user_embedding_dim ** 0.5)  # (1, 1, h)
-        # u0_latent = tf.squeeze(u0_latent, axis=0)  # (1, h)
-        # test_user_emb = tf.tile(u0_latent, [1 + self.num_neg_test, 1])  # (101, h)
+        u0_latent = self.user_embedding_layer(user)
+        u0_latent = u0_latent * (self.user_embedding_dim ** 0.5)  # (1, 1, h)
+        u0_latent = tf.squeeze(u0_latent, axis=0)  # (1, h)
+        test_user_emb = tf.tile(u0_latent, [1 + self.num_neg_test, 1])  # (101, h)
 
-        # u_latent = self.user_embedding_layer(user)
-        # u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
-        # u_latent = tf.tile(u_latent, [1, tf.shape(input_seq)[1], 1])  # (b, s, h)
+        u_latent = self.user_embedding_layer(user)
+        u_latent = u_latent * (self.user_embedding_dim ** 0.5)  # (b, 1, h)
+        u_latent = tf.tile(u_latent, [1, tf.shape(input_seq)[1], 1])  # (b, s, h)
 
         mask = tf.expand_dims(tf.cast(tf.not_equal(input_seq, 0), tf.float32), -1)
         seq_embeddings, positional_embeddings = self.embedding(input_seq)
-        # seq_embeddings = tf.reshape(
-        #     tf.concat([seq_embeddings, u_latent], 2),
-        #     [tf.shape(input_seq)[0], -1, self.hidden_units],
-        # )
+        seq_embeddings = tf.reshape(
+            tf.concat([seq_embeddings, u_latent], 2),
+            [tf.shape(input_seq)[0], -1, self.hidden_units],
+        )
         seq_embeddings += positional_embeddings  # (b, s, h1 + h2)
 
         if self.use_item_history:
             # user history embeddings
-            hist_attention = self.attention_encoder(input_seq, his)
+            i_hist_attention = self.attention_encoder(input_seq, his_i)
             # hist_attention = self.history_embedding(his, training)
-            seq_embeddings += hist_attention
+            if self.use_user_embedding:
+                i_hist_attention = self.mlp_item(i_hist_attention)
+            seq_embeddings += i_hist_attention
+
+        if self.use_user_history:
+            users = tf.tile(user, [1, self.seq_max_len])
+            u_hist_attention = self.attention_encoder(users, his_u)
+            u_hist_attention = self.mlp_user(u_hist_attention)
+            seq_embeddings += u_hist_attention
 
         # seq_embeddings = self.dropout_layer(seq_embeddings)
         seq_embeddings *= mask
@@ -601,12 +627,12 @@ class HSASREC(tf.keras.Model):
 
         candidate_emb = self.item_embedding_layer(candidate)  # (b, s, d)
         candidate_emb = tf.squeeze(candidate_emb, axis=0)  # (s2, h2)
-        # candidate_emb = tf.reshape(
-        #     tf.concat([candidate_emb, test_user_emb], 1), [-1, self.hidden_units]
-        # )  # (b*s2, h1+h2)
+        candidate_emb = tf.reshape(
+            tf.concat([candidate_emb, test_user_emb], 1), [-1, self.hidden_units]
+        )  # (b*s2, h1+h2)
         candidate_emb = tf.transpose(candidate_emb, perm=[1, 0])  # (h1+h2, b*s2)
+        # print(seq_emb.shape, candidate_emb.shape)  # (50, 200) & (200, 101)
         # candidate_emb = tf.transpose(candidate_emb, perm=[0, 2, 1])  # (b, d, s)
-        # print(seq_emb.shape, candidate_emb.shape)
 
         test_logits = tf.matmul(seq_emb, candidate_emb)  # (200, 100) * (1, 101, 100)'
         # print(test_logits.shape)

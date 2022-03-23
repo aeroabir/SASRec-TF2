@@ -4,6 +4,7 @@ import argparse
 import tensorflow as tf
 import numpy as np
 import pickle
+import pandas as pd
 import sys
 from tqdm import tqdm
 
@@ -11,7 +12,9 @@ from sampler import WarpSampler, WarpSampler_with_time, WarpSampler_with_graph
 from models.sasrec import SASREC
 from models.sasrec_plus import SASREC_PLUS
 from models.ssept_plus import SSEPT_PLUS
-from models.hsasrec_users import HSASREC
+
+# from models.hsasrec_users import HSASREC
+from models.hsasrec import HSASREC
 from models.tisasrec import TISASREC
 from models.ssept import SSEPT
 from models.rnn import RNNREC
@@ -22,6 +25,7 @@ from util import (
     Relation,
     evaluate,
     evaluate_valid,
+    predict,
 )
 
 
@@ -31,8 +35,42 @@ def str2bool(s):
     return s == "True"
 
 
-def create_combined_dataset(u, seq, pos, neg, seq_max_len):
+def create_combined_dataset(u, seq, pos, neg, extras):
+    params = extras[0]
+    seq_max_len = params.maxlen
     inputs = {}
+
+    if len(extras) == 2:
+        if params.add_embeddings == 1:
+            item_df = extras[1]
+            # item-number to category-id
+            item2cat = [ii + 1 for ii in item_df["cid"].tolist()]
+            item2cat.insert(0, 0)
+            # print(min(item2cat), max(item2cat))
+
+            def map_category(source, mappings):
+                target = []
+                for s in source:
+                    smap = [mappings[i] for i in s]
+                    target.append(smap)
+                return target
+
+            seq_cid = map_category(seq, item2cat)
+            pos_cid = map_category(pos, item2cat)
+            neg_cid = map_category(neg, item2cat)
+            seq_cid = tf.keras.preprocessing.sequence.pad_sequences(
+                seq_cid, padding="pre", truncating="pre", maxlen=seq_max_len
+            )
+            pos_cid = tf.keras.preprocessing.sequence.pad_sequences(
+                pos_cid, padding="pre", truncating="pre", maxlen=seq_max_len
+            )
+            neg_cid = tf.keras.preprocessing.sequence.pad_sequences(
+                neg_cid, padding="pre", truncating="pre", maxlen=seq_max_len
+            )
+            inputs["input_seq_c"] = seq_cid
+            inputs["positive_c"] = pos_cid
+            inputs["negative_c"] = neg_cid
+
     seq = tf.keras.preprocessing.sequence.pad_sequences(
         seq, padding="pre", truncating="pre", maxlen=seq_max_len
     )
@@ -92,9 +130,12 @@ parser.add_argument("--dropout_rate", default=0.1, type=float)
 parser.add_argument("--l2_emb", default=0.0, type=float)
 parser.add_argument("--num_neg_test", default=100, type=int)
 parser.add_argument("--model_name", default="sasrec", type=str)
+parser.add_argument("--patience", default=5, type=int)
 
 # for additional embeddings
 parser.add_argument("--add_embeddings", default=0, type=int)
+parser.add_argument("--user_emb_dim", default=10, type=int)
+parser.add_argument("--concat_type", default="ignore", type=str)
 
 # for time-dependent Transformer model
 parser.add_argument("--add_time", default=0, type=int)
@@ -123,6 +164,8 @@ with open(os.path.join(args.dataset + "_" + args.train_dir, "args.txt"), "w") as
 f.close()
 
 f = open(os.path.join(args.dataset + "_" + args.train_dir, "log.txt"), "w")
+if args.model_name == "hsasrec":
+    args.add_history = 1
 
 if args.add_history == 1:
     dataset = data_partition_with_graph(args.dataset)
@@ -137,7 +180,6 @@ if args.add_history == 1:
         maxlen2=args.user_len,  # number of past users
         n_workers=3,
     )
-
 
 elif args.add_time == 1:
     dataset = data_partition_with_time(args.dataset)
@@ -193,14 +235,34 @@ f.write(f"{usernum} Users and {itemnum} items\n")
 f.write(f"average sequence length: {cc / len(user_train):.2f} \n")
 
 if args.add_embeddings == 1:
-    embed_file = os.path.join("data/", args.dataset + "_item_embeddings.pkl")
-    with open(embed_file, "rb") as handle:
-        tensor = pickle.load(handle)
+    # pre-learned embeddings
+    # embed_file = os.path.join("data/", args.dataset + "_item_embeddings.pkl")
+    # with open(embed_file, "rb") as handle:
+    #     tensor = pickle.load(handle)
+
+    node_file = os.path.join("data/", args.dataset + "_nodes.txt")
+    feature_names = [f"d{i}" for i in range(50)]
+    raw_content = pd.read_csv(
+        node_file,
+        sep="\t",  # tab-separated
+        header=None,  # no heading row
+        names=["id", *feature_names, "category"],
+    )
+    tensor = raw_content[feature_names].to_numpy()
+
+    tensor_norm = np.linalg.norm(tensor, axis=-1)
+    tensor /= tensor_norm[:, np.newaxis]
     print("Embedding matrix:", tensor.shape)
+    print(tensor)
+    print(np.linalg.norm(tensor, axis=-1))
     embed_matrix = np.zeros((tensor.shape[0] + 1, tensor.shape[1]))
     embed_matrix[1 : itemnum + 1, :] = tensor
-    del tensor
 
+    cmap = {s: i for i, s in enumerate(set(raw_content["category"]))}
+    raw_content["cid"] = raw_content["category"].map(cmap)
+    num_prod_categories = len(cmap)
+    # node_feature = raw_content["category"].tolist()
+    print(f"# of categories: {num_prod_categories}")
     # embed_matrix = text_processing(args)
     # item_desc, embed_matrix = text_processing(args)
 else:
@@ -216,6 +278,7 @@ train_step_signature = [
     },
     tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
 ]
+extra_argument = [args]
 
 if args.model_name == "sasrec":
     if args.add_embeddings == 1:
@@ -233,8 +296,23 @@ if args.model_name == "sasrec":
             l2_reg=args.l2_emb,
             num_neg_test=args.num_neg_test,
             item_text_embedding_matrix=embed_matrix,
+            concat_type=args.concat_type,
+            num_prod_categories=num_prod_categories,
             # item_text_sequences=item_desc
         )
+        train_step_signature = [
+            {
+                "users": tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
+                "input_seq": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+                "positive": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+                "negative": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+                "input_seq_c": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+                "positive_c": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+                "negative_c": tf.TensorSpec(shape=(None, args.maxlen), dtype=tf.int64),
+            },
+            tf.TensorSpec(shape=(None, 1), dtype=tf.int64),
+        ]
+        extra_argument.append(raw_content)
 
     else:
         print("Invoking vanilla SASREC model ... ")
@@ -259,7 +337,7 @@ elif args.model_name == "ssept":
         user_num=usernum,
         seq_max_len=args.maxlen,
         num_blocks=args.num_blocks,
-        user_embedding_dim=args.hidden_units,
+        user_embedding_dim=args.user_emb_dim, #args.hidden_units,
         item_embedding_dim=args.hidden_units,
         attention_dim=args.hidden_units,
         attention_num_heads=args.num_heads,
@@ -323,7 +401,7 @@ elif args.model_name == "hsasrec":
         user_len=args.user_len,
         num_blocks=args.num_blocks,
         embedding_dim=args.hidden_units,
-        user_embedding_dim=int(args.hidden_units / 1),
+        user_embedding_dim=args.user_emb_dim,
         attention_dim=args.hidden_units,
         attention_num_heads=args.num_heads,
         dropout_rate=args.dropout_rate,
@@ -452,6 +530,9 @@ T = 0.0
 t0 = time.time()
 
 # try:
+best_ndcg = 0
+best_model = None
+patience = 0
 for epoch in range(1, args.num_epochs + 1):
 
     step_loss = []
@@ -462,7 +543,7 @@ for epoch in range(1, args.num_epochs + 1):
 
         if args.add_time == 1 and args.model_name in ("tisasrec"):
             u, seq, time_seq, time_matrix, pos, neg = sampler.next_batch()
-            inputs, target = create_combined_dataset(u, seq, pos, neg, args.maxlen)
+            inputs, target = create_combined_dataset(u, seq, pos, neg, extra_argument)
             inputs["time_matrix"] = np.array(time_matrix)  # (b, seqlen, seqlen)
             # inputs["position"] = np.tile(
             #     np.expand_dims(np.arange(args.maxlen), 0), (len(u), 1)
@@ -474,29 +555,32 @@ for epoch in range(1, args.num_epochs + 1):
             # sys.exit("KK")
             # u, seq, pos sequence of args.maxlen elements
             # his: sequence of (args.maxlen, args.maxlen2) elements
-            inputs, target = create_combined_dataset(u, seq, pos, neg, args.maxlen)
+            inputs, target = create_combined_dataset(u, seq, pos, neg, extra_argument)
             inputs["user_history"] = np.array(his_u)  # (b, seqlen, seqlen2)
             inputs["item_history"] = np.array(his_i)  # (b, seqlen, seqlen2)
 
         else:
             u, seq, pos, neg = sampler.next_batch()
-            inputs, target = create_combined_dataset(u, seq, pos, neg, args.maxlen)
+            inputs, target = create_combined_dataset(u, seq, pos, neg, extra_argument)
 
         # print(inputs["user_history"].shape)
-        # out = model(inputs, training=False)
+        # print(inputs["input_seq"], inputs["input_seq_c"])
+        # out = model(inputs, training=True)
+        # loss = loss_function(*out)
         # print(out)
-        # print(out.shape)
+        # print(loss)
         # sys.exit("TRAIN")
-
+        # print(step)
         loss = train_step(inputs, target)
-        # if tf.math.is_nan(loss):
-        #     with open('sample_nan.pkl', 'wb') as fw:
-        #         pickle.dump(inputs, fw)
-        #     model.save_weights('./checkpoints/my_checkpoint')
-        #     model.save('saved_model/temp_model')
-        #     sys.exit("!! NAN LOSS")
+        if tf.math.is_nan(loss):
+            # with open('sample_nan.pkl', 'wb') as fw:
+            #     pickle.dump(inputs, fw)
+            # model.save_weights('./checkpoints/my_checkpoint')
+            # model.save('saved_model/temp_model')
+            sys.exit("!! NAN LOSS")
 
         step_loss.append(loss)
+        # final_items = predict(model, dataset, extra_argument)
         # with tf.GradientTape() as tape:
         #     pos_logits, neg_logits, istarget = model(inputs, training=True)
         #     loss = loss_function(pos_logits, neg_logits, istarget)
@@ -515,21 +599,35 @@ for epoch in range(1, args.num_epochs + 1):
         t1 = time.time() - t0
         T += t1
         print("Evaluating...")
-        t_test = evaluate(model, dataset, args)
-        t_valid = evaluate_valid(model, dataset, args)
+        # t_test = evaluate(model, dataset, args)
+        t_valid = evaluate_valid(model, dataset, extra_argument)
         print(
             f"epoch: {epoch}, time: {T}, valid (NDCG@10: {t_valid[0]:.4f}, HR@10: {t_valid[1]:.4f})"
         )
-        print(
-            f"epoch: {epoch}, time: {T},  test (NDCG@10: {t_test[0]:.4f}, HR@10: {t_test[1]:.4f})"
-        )
+        # print(
+        #     f"epoch: {epoch}, time: {T},  test (NDCG@10: {t_test[0]:.4f}, HR@10: {t_test[1]:.4f})"
+        # )
+        if t_valid[0] > best_ndcg:
+            print("Performance improved ... updated the model.")
+            best_ndcg = t_valid[0]
+            best_model = model
+        else:
+            patience += 1
+            if patience == args.patience:
+                print(f"Maximum patience {patience} reached ... exiting!")
 
-        f.write("validation: " + str(t_valid) + " test: " + str(t_test) + "\n")
+        f.write("validation: " + str(t_valid) + "\n")
         f.flush()
         t0 = time.time()
 
-t_test = evaluate(model, dataset, args)
-print(f"\nepoch: {epoch}, test (NDCG@10: {t_test[0]:.4f}, HR@10: {t_test[1]:.4f})")
+# for cases where best_model was not created, e.g., number of epochs too small
+if not best_model:
+    best_model = model
+
+t_valid = evaluate_valid(best_model, dataset, extra_argument)
+t_test = evaluate(best_model, dataset, extra_argument)
+print(f"\nepoch: {epoch}, valid (NDCG@10: {t_valid[0]:.4f}, HR@10: {t_valid[1]:.4f})")
+print(f"epoch: {epoch}, test (NDCG@10: {t_test[0]:.4f}, HR@10: {t_test[1]:.4f})")
 f.write(f"\nepoch: {epoch}, test (NDCG@10: {t_test[0]:.4f}, HR@10: {t_test[1]:.4f})")
 # except:
 #     sampler.close()

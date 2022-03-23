@@ -96,13 +96,25 @@ def data_partition(fname):
     user_train = {}
     user_valid = {}
     user_test = {}
+    colsep = "\t"
+
+    sample = pd.read_csv(f"data/{fname}.txt", sep=colsep, nrows=10)
+    ncol = sample.shape[1]
+    if ncol == 1:
+        raise ValueError("Not enough data to unpack!!")
+
     # assume user/item index starting from 1
     f = open("data/%s.txt" % fname, "r")
     for line in f:
-        try:
-            u, i = line.rstrip().split(" ")
-        except:
-            u, i, timestamp = line.rstrip().split("\t")
+        if ncol == 2:
+            u, i = line.rstrip().split(colsep)
+        elif ncol == 3:
+            u, i, timestamp = line.rstrip().split(colsep)
+        elif ncol == 4:
+            u, i, _, _ = line.rstrip().split(colsep)
+        else:
+            raise ValueError("Unknown number of columns")
+
         u = int(u)
         i = int(i)
         usernum = max(u, usernum)
@@ -234,7 +246,92 @@ def data_partition_with_time(fname):
     return [user_train, user_valid, user_test, usernum, itemnum, timenum]
 
 
-def evaluate(model, dataset, args):
+def predict(model, dataset, extras):
+    """Predict the next best item
+    based on the entire interaction history
+
+    Taking a huge time if there are too many
+    users and products since this is done one
+    at a time.
+
+    """
+
+    args = extras[0]
+    [train, valid, test, usernum, itemnum] = copy.deepcopy(dataset)
+    users = range(1, usernum + 1)
+    next_items = {}
+    for u in tqdm(users, ncols=70, leave=False, unit="b"):
+
+        if len(train[u]) < 1 or len(test[u]) < 1:
+            continue
+
+        seq = np.zeros([args.maxlen], dtype=np.int32)
+        idx = args.maxlen - 1
+        seq[idx] = test[u][0]  # last item
+        idx -= 1
+        seq[idx] = valid[u][0]  # last but one item (coming from validation)
+        idx -= 1
+        for i in reversed(train[u]):
+            seq[idx] = i
+            idx -= 1
+            if idx == -1:
+                break
+
+        # test over all the items
+        item_idx = [ii for ii in range(1, itemnum + 1)]
+        inputs = {}
+        inputs["user"] = np.expand_dims(np.array([u]), axis=-1)
+        inputs["input_seq"] = np.array([seq])
+
+        # we need to break the items into a batch of 101
+        b = args.num_neg_test + 1
+        num_examples = len(item_idx)
+        num_steps = int(num_examples / b)
+        rem = int(num_examples % b)
+        if rem > 0:
+            num_steps += 1
+        start, end = 0, b
+        all_preds = []
+        for ii in range(num_steps):
+            items_ii = item_idx[start:end]
+            # print(ii, start, end, len(items_ii))
+            if len(items_ii) < b:
+                items_ii += [items_ii[-1]] * (b - len(items_ii))
+                # print(ii, len(items_ii), "appended")
+            inputs["candidate"] = np.array([items_ii])
+            pred_ii = model.predict(inputs)  # (1, b)
+            all_preds.append(pred_ii)
+
+            start += b
+            end += b
+            if end > num_examples:
+                end = num_examples
+        all_preds = tf.concat(all_preds, -1)
+        all_preds = all_preds[0, 0:itemnum]
+        all_preds = -1.0 * all_preds
+        all_preds = np.array(all_preds)
+
+        next_item = all_preds.argmax()
+        next_items[u] = next_item
+
+    return next_items
+
+
+def evaluate(model, dataset, extras):
+
+    args = extras[0]
+    if args.add_embeddings == 1:
+        item_df = extras[1]
+        # item-number to category-id
+        item2cat = [ii + 1 for ii in item_df["cid"].tolist()]
+        item2cat.insert(0, 0)
+
+        def map_category(source, mappings):
+            target = []
+            for s in source:
+                smap = [mappings[i] for i in s]
+                target.append(smap)
+            return target
 
     if args.add_time == 1:
         res = evaluate_with_time(model, dataset, args)
@@ -294,6 +391,12 @@ def evaluate(model, dataset, args):
         inputs["user"] = np.expand_dims(np.array([u]), axis=-1)
         inputs["input_seq"] = np.array([seq])
         inputs["candidate"] = np.array([item_idx])
+
+        if args.add_embeddings == 1:
+            seq_cid = map_category([seq], item2cat)
+            item_idx_cid = map_category([item_idx], item2cat)
+            inputs["input_seq_c"] = np.array(seq_cid)
+            inputs["candidates_c"] = np.array(item_idx_cid)
 
         # inverse to get descending sort
         predictions = -1.0 * model.predict(inputs)
@@ -358,7 +461,21 @@ def evaluate(model, dataset, args):
     return NDCG / valid_user, HT / valid_user
 
 
-def evaluate_valid(model, dataset, args):
+def evaluate_valid(model, dataset, extras):
+
+    args = extras[0]
+    if args.add_embeddings == 1:
+        item_df = extras[1]
+        # item-number to category-id
+        item2cat = [ii + 1 for ii in item_df["cid"].tolist()]
+        item2cat.insert(0, 0)
+
+        def map_category(source, mappings):
+            target = []
+            for s in source:
+                smap = [mappings[i] for i in s]
+                target.append(smap)
+            return target
 
     if args.add_time == 1:
         res = evaluate_valid_with_time(model, dataset, args)
@@ -406,6 +523,12 @@ def evaluate_valid(model, dataset, args):
         # if args.text_features == 1:
         #     inputs['inp_seq_tokens'] = item2text[inputs['input_seq'], :]
         #     inputs['candidate_tokens'] = item2text[inputs['candidate'], :]
+
+        if args.add_embeddings == 1:
+            seq_cid = map_category([seq], item2cat)
+            item_idx_cid = map_category([item_idx], item2cat)
+            inputs["input_seq_c"] = np.array(seq_cid)
+            inputs["candidate_c"] = np.array(item_idx_cid)
 
         predictions = -1.0 * model.predict(inputs)
         predictions = np.array(predictions)
